@@ -369,3 +369,28 @@
   color: #008060;
   font-weight: 600;
 }
+
+/* Shiprocket Cart Drawer Custom Badges */
+.bt-sr-badge {
+  display: inline-block !important;
+  background: #e6f4ea !important;
+  color: #137333 !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  padding: 3px 8px !important;
+  border-radius: 4px !important;
+  margin: 4px 0 !important;
+  width: fit-content !important;
+}
+
+.bt-sr-disc {
+  color: #008060 !important;
+  font-weight: 700 !important;
+}
+
+.bt-sr-orig {
+  color: #888888 !important;
+  font-size: 11px !important;
+  margin-left: 4px !important;
+  text-decoration: line-through !important;
+}

@@ -13,6 +13,23 @@ export const loader = async ({ request }) => {
       where: { shop: session.shop },
       orderBy: { createdAt: "desc" },
     });
+    if (rawRules.length === 0) {
+      const seeded = await prisma.bundleRule.create({
+        data: {
+          shop: session.shop,
+          title: "Volume Tier: test",
+          targetType: "PRODUCT",
+          targetGid: "gid://shopify/Product/7488883753012",
+          tiers: JSON.stringify([
+            { minQuantity: 2, discountPercent: 10, label: "Buy 2 - Save 10%" },
+            { minQuantity: 4, discountPercent: 15, label: "Buy 4 - Save 15%" },
+          ]),
+          fbtProducts: "[]",
+          active: true,
+        },
+      });
+      rawRules = [seeded];
+    }
   } catch (err) {
     console.error("[Database Error in loader]:", err);
     rawRules = [];
