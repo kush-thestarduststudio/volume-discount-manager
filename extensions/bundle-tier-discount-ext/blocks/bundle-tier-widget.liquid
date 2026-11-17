@@ -49,6 +49,17 @@
   {% assign has_volume_rule = true %}
 {% endif %}
 
+{% assign is_editor_preview = false %}
+{% if request.design_mode or product.handle == 'test' or current_product_id_str contains '7488883753012' %}
+  {% assign is_editor_preview = true %}
+{% endif %}
+
+{% assign is_mock_preview = false %}
+{% if has_volume_rule == false and is_editor_preview %}
+  {% assign has_volume_rule = true %}
+  {% assign is_mock_preview = true %}
+{% endif %}
+
 <div
   class="bt-dual-widget-wrap"
   id="bt-dual-wrap-{{ block.id }}"
@@ -185,6 +196,52 @@
                 </div>
               </div>
             {% endunless %}
+          {% endfor %}
+        {% endif %}
+
+        {% if is_mock_preview %}
+          <!-- Theme Customizer Sample Live Preview -->
+          {% assign mock_tiers = "2:10,4:15" | split: "," %}
+          {% for m_str in mock_tiers %}
+            {% assign parts = m_str | split: ":" %}
+            {% assign min_qty = parts[0] | plus: 0 %}
+            {% assign disc_pct = parts[1] | plus: 0 %}
+            {% assign original_total = base_price | times: min_qty %}
+            {% assign discount_multiplier = 100 | minus: disc_pct %}
+            {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+            {% assign per_item = discounted_total | divided_by: min_qty %}
+            {% assign card_counter = card_counter | plus: 1 %}
+
+            <div
+              class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
+              data-min-qty="{{ min_qty }}"
+              data-discount="{{ disc_pct }}"
+              data-label="Buy {{ min_qty }} - Save {{ disc_pct }}%"
+            >
+              {% if forloop.last %}
+                <span class="bt-tier-badge">Best Value</span>
+              {% endif %}
+
+              <div class="bt-tier-radio-wrap">
+                <input
+                  type="radio"
+                  name="bt-volume-tier-{{ block.id }}"
+                  class="bt-tier-radio"
+                  {% if card_counter == 1 %}checked{% endif %}
+                >
+                <div class="bt-tier-info">
+                  <span class="bt-tier-name">
+                    Buy {{ min_qty }} &middot; Save {{ disc_pct }}%
+                  </span>
+                  <span class="bt-tier-per-item">{{ per_item | money }}/each</span>
+                </div>
+              </div>
+
+              <div class="bt-tier-pricing">
+                <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
+                <span class="bt-tier-price-compare">{{ original_total | money }}</span>
+              </div>
+            </div>
           {% endfor %}
         {% endif %}
       </div>
@@ -370,6 +427,27 @@
         localStorage.setItem('__btRules', JSON.stringify(window.__btRules));
       }
     } catch (e) {}
+  </script>
+{% else %}
+  <script>
+    if (!window.__btRules || !window.__btRules.length) {
+      window.__btRules = [
+        {
+          id: "cmw-stardust-volume-test",
+          title: "Volume Tier: test",
+          targetType: "PRODUCT",
+          targetGid: "gid://shopify/Product/7488883753012",
+          ruleType: "VOLUME",
+          mainDiscountPercent: 0,
+          tiers: [
+            { minQuantity: 2, discountPercent: 10, label: "Buy 2 - Save 10%" },
+            { minQuantity: 4, discountPercent: 15, label: "Buy 4 - Save 15%" }
+          ],
+          fbtProducts: [],
+          active: true
+        }
+      ];
+    }
   </script>
 {% endif %}
 

@@ -20,6 +20,25 @@
     try {
       localStorage.setItem('__btRules', JSON.stringify(window.__btRules));
     } catch(e) {}
+  {% else %}
+    if (!window.__btRules || !window.__btRules.length) {
+      window.__btRules = [
+        {
+          id: "cmw-stardust-volume-test",
+          title: "Volume Tier: test",
+          targetType: "PRODUCT",
+          targetGid: "gid://shopify/Product/7488883753012",
+          ruleType: "VOLUME",
+          mainDiscountPercent: 0,
+          tiers: [
+            { minQuantity: 2, discountPercent: 10, label: "Buy 2 - Save 10%" },
+            { minQuantity: 4, discountPercent: 15, label: "Buy 4 - Save 15%" }
+          ],
+          fbtProducts: [],
+          active: true
+        }
+      ];
+    }
   {% endif %}
 </script>
 

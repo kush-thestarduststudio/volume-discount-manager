@@ -5,7 +5,7 @@ import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   let rawRules = [];
   try {
@@ -33,6 +33,13 @@ export const loader = async ({ request }) => {
   } catch (err) {
     console.error("[Database Error in loader]:", err);
     rawRules = [];
+  }
+
+  // Auto-sync metafields and automatic discount node on every load so Shopify is always up to date
+  try {
+    await syncShopifyDiscountAndMetafields(admin, session.shop);
+  } catch (syncErr) {
+    console.error("[AutoSync in loader error]:", syncErr);
   }
 
   return {
@@ -177,13 +184,29 @@ export const action = async ({ request }) => {
       });
     }
 
-    // Sync all active rules to Shopify Shop Metafield ($app:bundle_tiers / config)
+    // Sync all active rules to Shopify Shop Metafield & Automatic Discount
+    await syncShopifyDiscountAndMetafields(admin, session.shop);
+
+    return { ok: true, message: "Campaign saved and synced to Shopify successfully!" };
+  } catch (err) {
+    console.error("[ActionError]", err);
+    return { ok: false, error: err.message || "An unexpected error occurred." };
+  }
+};
+
+async function syncShopifyDiscountAndMetafields(admin, shop) {
+  try {
     const activeRules = await prisma.bundleRule.findMany({
-      where: { shop: session.shop, active: true },
+      where: { shop, active: true },
     });
 
     const activeRulesPayload = activeRules.map((r) => {
-      const parsedTiers = JSON.parse(r.tiers || "[]");
+      let parsedTiers = [];
+      try {
+        parsedTiers = JSON.parse(r.tiers || "[]");
+      } catch {
+        parsedTiers = [];
+      }
       let parsedFbt = [];
       let mainDiscountPercent = 0;
       try {
@@ -215,8 +238,8 @@ export const action = async ({ request }) => {
     for (const rule of activeRulesPayload) {
       if (rule.targetType === "COLLECTION" && rule.targetGid) {
         try {
-          const colRes = await admin.graphql(`
-            query GetColProducts($id: ID!) {
+          const colRes = await admin.graphql(
+            `query GetColProducts($id: ID!) {
               collection(id: $id) {
                 products(first: 100) {
                   nodes {
@@ -224,11 +247,12 @@ export const action = async ({ request }) => {
                   }
                 }
               }
-            }
-          `, { variables: { id: rule.targetGid } });
+            }`,
+            { variables: { id: rule.targetGid } }
+          );
           const colJson = await colRes.json();
           const prodNodes = colJson?.data?.collection?.products?.nodes || [];
-          rule.collectionProductIds = prodNodes.map((p) => String(p.id).replace(/\D/g, ''));
+          rule.collectionProductIds = prodNodes.map((p) => String(p.id).replace(/\D/g, ""));
         } catch (e) {
           console.warn("Failed to fetch products for collection:", rule.targetGid);
         }
@@ -258,8 +282,7 @@ export const action = async ({ request }) => {
     if (shopGid) {
       // 2. Set Shop Metafield in bulk (both app-reserved and public namespaces for 100% theme compatibility)
       const setMetafieldRes = await admin.graphql(
-        `
-        mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        `mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
           metafieldsSet(metafields: $metafields) {
             metafields {
               id
@@ -271,8 +294,7 @@ export const action = async ({ request }) => {
               message
             }
           }
-        }
-      `,
+        }`,
         {
           variables: {
             metafields: [
@@ -298,6 +320,8 @@ export const action = async ({ request }) => {
       const userErrors = setMetafieldJson?.data?.metafieldsSet?.userErrors;
       if (userErrors && userErrors.length > 0) {
         console.warn("[MetafieldSync] Errors:", userErrors);
+      } else {
+        console.log("[MetafieldSync] Successfully updated shop metafield config");
       }
     }
 
@@ -324,15 +348,15 @@ export const action = async ({ request }) => {
       `);
       const discountNodesJson = await discountNodesRes.json();
       const existingAppDiscount = discountNodesJson?.data?.discountNodes?.nodes?.find(
-        (n) => n.discount?.__typename === "DiscountAutomaticApp" &&
-               (n.discount?.title?.includes("Bundle & Tier") || n.discount?.title?.includes("Volume"))
+        (n) =>
+          n.discount?.__typename === "DiscountAutomaticApp" &&
+          (n.discount?.title?.includes("Bundle & Tier") || n.discount?.title?.includes("Volume"))
       );
 
       if (existingAppDiscount) {
         // UPDATE existing discount node with the latest active rules
         const updateRes = await admin.graphql(
-          `
-          mutation UpdateAppDiscount($id: ID!, $automaticAppDiscount: DiscountAutomaticAppInput!) {
+          `mutation UpdateAppDiscount($id: ID!, $automaticAppDiscount: DiscountAutomaticAppInput!) {
             discountAutomaticAppUpdate(id: $id, automaticAppDiscount: $automaticAppDiscount) {
               automaticAppDiscount {
                 discountId
@@ -343,8 +367,7 @@ export const action = async ({ request }) => {
                 message
               }
             }
-          }
-        `,
+          }`,
           {
             variables: {
               id: existingAppDiscount.id,
@@ -378,14 +401,21 @@ export const action = async ({ request }) => {
           }
         `);
         const functionsJson = await functionsRes.json();
-        const funcNode = functionsJson?.data?.shopifyFunctions?.nodes?.find(
-          (n) => n.apiType === "discounts" || n.title?.includes("bundle-tier-discount-func")
-        );
+        const allFuncs = functionsJson?.data?.shopifyFunctions?.nodes || [];
+        console.log("[ShopifyFunction] Available functions:", JSON.stringify(allFuncs));
+        const funcNode =
+          allFuncs.find(
+            (n) =>
+              (n.title && n.title.toLowerCase().includes("bundle")) ||
+              (n.title && n.title.toLowerCase().includes("tier")) ||
+              (n.title && n.title.toLowerCase().includes("discount")) ||
+              (n.apiType && n.apiType.toLowerCase().includes("discount"))
+          ) || allFuncs[0];
 
         if (funcNode) {
+          console.log("[ShopifyFunction] Registering discount with function:", funcNode.id, funcNode.title);
           const createRes = await admin.graphql(
-            `
-            mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
+            `mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
               discountAutomaticAppCreate(automaticAppDiscount: $automaticAppDiscount) {
                 automaticAppDiscount {
                   discountId
@@ -396,8 +426,7 @@ export const action = async ({ request }) => {
                   message
                 }
               }
-            }
-          `,
+            }`,
             {
               variables: {
                 automaticAppDiscount: {
@@ -423,19 +452,18 @@ export const action = async ({ request }) => {
             }
           );
           const createJson = await createRes.json();
-          console.log("[ShopifyFunction] Created discount node:", JSON.stringify(createJson));
+          console.log("[ShopifyFunction] Created discount node response:", JSON.stringify(createJson));
+        } else {
+          console.warn("[ShopifyFunction] No shopifyFunction found to register automatic discount.");
         }
       }
     } catch (fnErr) {
       console.log("[ShopifyFunction] Error:", fnErr.message || fnErr);
     }
-
-    return { ok: true, message: "Campaign saved and synced to Shopify successfully!" };
-  } catch (err) {
-    console.error("[ActionError]", err);
-    return { ok: false, error: err.message || "An unexpected error occurred." };
+  } catch (syncErr) {
+    console.error("[syncShopifyDiscountAndMetafields] Error:", syncErr);
   }
-};
+}
 
 export default function BundleTierIndex() {
   const { rules } = useLoaderData();
