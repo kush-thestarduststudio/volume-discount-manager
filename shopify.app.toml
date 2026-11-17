@@ -2,14 +2,14 @@
 
 client_id = "e57d0d801d6ad34806b952676b7056d7"
 name = "Bundle & Tier Discounts"
-application_url = "https://example.com"
+application_url = "https://volume-discount-manager.onrender.com"
 embedded = true
 
 [access_scopes]
 scopes = "read_discounts,read_products,read_themes,write_discounts,write_products,write_themes"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://volume-discount-manager.onrender.com/api/auth" ]
 
 [webhooks]
 api_version = "2026-04"
