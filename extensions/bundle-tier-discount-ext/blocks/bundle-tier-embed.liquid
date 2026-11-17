@@ -1,0 +1,45 @@
+{% assign config_data = nil %}
+{% if app.metafields.bundle_tiers.config.value %}
+  {% assign config_data = app.metafields.bundle_tiers.config.value %}
+{% elsif shop.metafields['$app:bundle_tiers']['config'].value %}
+  {% assign config_data = shop.metafields['$app:bundle_tiers']['config'].value %}
+{% elsif shop.metafields.bundle_tiers.config.value %}
+  {% assign config_data = shop.metafields.bundle_tiers.config.value %}
+{% elsif app.metafields.bundle_tiers.config %}
+  {% assign config_data = app.metafields.bundle_tiers.config %}
+{% elsif shop.metafields['$app:bundle_tiers']['config'] %}
+  {% assign config_data = shop.metafields['$app:bundle_tiers']['config'] %}
+{% elsif shop.metafields.bundle_tiers.config %}
+  {% assign config_data = shop.metafields.bundle_tiers.config %}
+{% endif %}
+
+<script>
+  window.__btAutoInject = {{ block.settings.auto_inject | default: true }};
+  {% if config_data and config_data.rules %}
+    window.__btRules = {{ config_data.rules | json }};
+    try {
+      localStorage.setItem('__btRules', JSON.stringify(window.__btRules));
+    } catch(e) {}
+  {% endif %}
+</script>
+
+{% schema %}
+{
+  "name": "Bundle & Tier Core",
+  "target": "body",
+  "javascript": "bundle-tier.js",
+  "stylesheet": "bundle-tier.css",
+  "settings": [
+    {
+      "type": "paragraph",
+      "content": "Powers cart discounts, Shiprocket Cart Drawer sync, and PDP volume tier displays across your store."
+    },
+    {
+      "type": "checkbox",
+      "id": "auto_inject",
+      "label": "Auto-inject on Product Pages",
+      "default": true
+    }
+  ]
+}
+{% endschema %}

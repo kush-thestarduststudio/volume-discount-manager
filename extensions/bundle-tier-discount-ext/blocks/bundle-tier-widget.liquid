@@ -1,13 +1,13 @@
 {% assign config_data = nil %}
 
-{% if shop.metafields.app.bundle_tiers.config.value %}
-  {% assign config_data = shop.metafields.app.bundle_tiers.config.value %}
+{% if app.metafields.bundle_tiers.config.value %}
+  {% assign config_data = app.metafields.bundle_tiers.config.value %}
 {% elsif shop.metafields['$app:bundle_tiers']['config'].value %}
   {% assign config_data = shop.metafields['$app:bundle_tiers']['config'].value %}
 {% elsif shop.metafields.bundle_tiers.config.value %}
   {% assign config_data = shop.metafields.bundle_tiers.config.value %}
-{% elsif shop.metafields.app.bundle_tiers.config %}
-  {% assign config_data = shop.metafields.app.bundle_tiers.config %}
+{% elsif app.metafields.bundle_tiers.config %}
+  {% assign config_data = app.metafields.bundle_tiers.config %}
 {% elsif shop.metafields['$app:bundle_tiers']['config'] %}
   {% assign config_data = shop.metafields['$app:bundle_tiers']['config'] %}
 {% elsif shop.metafields.bundle_tiers.config %}
@@ -49,394 +49,107 @@
   {% assign has_volume_rule = true %}
 {% endif %}
 
-{% if has_volume_rule or matched_fbt_rule != nil %}
-  <style>
-    .bt-dual-widget-wrap {
-      display: flex;
-      flex-direction: column;
-      gap: 1.5rem;
-      margin: 1.5rem 0;
-      width: 100%;
-      box-sizing: border-box;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    }
-    .bt-widget-container {
-      padding: 1.25rem;
-      background: #ffffff;
-      border: 1px solid #e1e3e5;
-      border-radius: 12px;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
-      color: #202223;
-      box-sizing: border-box;
-      width: 100%;
-    }
-    .bt-widget-header {
-      margin-bottom: 1rem;
-    }
-    .bt-widget-title {
-      font-size: 1.15rem;
-      font-weight: 700;
-      margin: 0 0 0.25rem 0;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: #1a1a1a;
-    }
-    .bt-widget-subtitle {
-      font-size: 0.85rem;
-      color: #6d7175;
-      margin: 0;
-    }
-    /* Volume Tiers */
-    .bt-tiers-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-      margin-bottom: 1.25rem;
-    }
-    .bt-tier-card {
-      position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0.85rem 1rem;
-      border: 2px solid #e1e3e5;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      background: #fafbfb;
-      user-select: none;
-    }
-    .bt-tier-card:hover {
-      border-color: #008060;
-      background: #f6fbf9;
-    }
-    .bt-tier-card.is-selected {
-      border-color: #008060;
-      background: #f0f8f5;
-      box-shadow: 0 0 0 1px #008060;
-    }
-    .bt-tier-radio-wrap {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    .bt-tier-radio {
-      accent-color: #008060;
-      width: 1.2rem;
-      height: 1.2rem;
-      cursor: pointer;
-    }
-    .bt-tier-info {
-      display: flex;
-      flex-direction: column;
-    }
-    .bt-tier-name {
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: #202223;
-    }
-    .bt-tier-per-item {
-      font-size: 0.8rem;
-      color: #6d7175;
-    }
-    .bt-tier-pricing {
-      text-align: right;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-    }
-    .bt-tier-price-current {
-      font-size: 1rem;
-      font-weight: 700;
-      color: #008060;
-    }
-    .bt-tier-price-compare {
-      font-size: 0.8rem;
-      color: #8c9196;
-      text-decoration: line-through;
-    }
-    .bt-tier-badge {
-      position: absolute;
-      top: -9px;
-      right: 12px;
-      background: #008060;
-      color: #ffffff;
-      font-size: 0.7rem;
-      font-weight: 700;
-      padding: 2px 8px;
-      border-radius: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .bt-action-wrap {
-      margin-top: 1rem;
-    }
-    .bt-add-btn {
-      width: 100%;
-      padding: 0.9rem 1.25rem;
-      background: #008060;
-      color: #ffffff;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: background 0.2s ease, transform 0.1s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 0.5rem;
-    }
-    .bt-add-btn:hover {
-      background: #006e52;
-    }
-    .bt-add-btn:active {
-      transform: scale(0.99);
-    }
-    .bt-add-btn:disabled, .bt-fbt-add-btn:disabled {
-      background: #8c9196;
-      cursor: not-allowed;
-    }
-    .bt-savings-summary {
-      margin-top: 0.5rem;
-      font-size: 0.85rem;
-      text-align: center;
-      color: #008060;
-      font-weight: 600;
-    }
-    /* FBT Bundle Styles */
-    .bt-fbt-gallery {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1.25rem;
-      overflow-x: auto;
-      padding: 0.5rem 0;
-    }
-    .bt-fbt-thumb-card {
-      position: relative;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      width: 84px;
-      flex-shrink: 0;
-      transition: opacity 0.2s;
-    }
-    .bt-fbt-thumb-wrap {
-      width: 80px;
-      height: 80px;
-      border-radius: 8px;
-      overflow: hidden;
-      border: 1px solid #d2d5d8;
-      background: #f6f6f7;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-    }
-    .bt-fbt-img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    .bt-fbt-no-img {
-      font-size: 0.75rem;
-      color: #6d7175;
-      text-align: center;
-      padding: 4px;
-    }
-    .bt-fbt-thumb-label {
-      font-size: 0.75rem;
-      color: #5c5f62;
-      margin-top: 4px;
-      font-weight: 500;
-    }
-    .bt-fbt-thumb-badge {
-      position: absolute;
-      top: -6px;
-      right: -4px;
-      background: #008060;
-      color: #ffffff;
-      font-size: 0.65rem;
-      font-weight: 700;
-      padding: 1px 5px;
-      border-radius: 6px;
-      z-index: 2;
-    }
-    .bt-fbt-plus-icon {
-      font-size: 1.4rem;
-      font-weight: 700;
-      color: #8c9196;
-      margin: 0 0.15rem;
-    }
-    .bt-fbt-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      margin-bottom: 1.25rem;
-    }
-    .bt-fbt-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.75rem;
-      padding: 0.6rem 0.75rem;
-      border-radius: 6px;
-      background: #fafbfb;
-      border: 1px solid #edf0f2;
-      cursor: pointer;
-      user-select: none;
-    }
-    .bt-fbt-row.is-base {
-      cursor: default;
-      background: #f4f6f8;
-    }
-    .bt-fbt-checkbox {
-      accent-color: #008060;
-      width: 1.15rem;
-      height: 1.15rem;
-      cursor: pointer;
-      flex-shrink: 0;
-    }
-    .bt-fbt-check-label {
-      flex: 1;
-      font-size: 0.85rem;
-      color: #202223;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-    .bt-fbt-save-pill {
-      display: inline-block;
-      background: #e3f1df;
-      color: #008060;
-      font-size: 0.75rem;
-      font-weight: 700;
-      padding: 1px 6px;
-      border-radius: 4px;
-    }
-    .bt-fbt-row-price {
-      font-size: 0.85rem;
-      font-weight: 600;
-      display: flex;
-      gap: 0.35rem;
-      align-items: baseline;
-      flex-shrink: 0;
-    }
-    .bt-fbt-price-discounted {
-      color: #008060;
-    }
-    .bt-fbt-price-original {
-      color: #8c9196;
-      text-decoration: line-through;
-      font-size: 0.75rem;
-    }
-    .bt-fbt-summary-wrap {
-      border-top: 1px dashed #e1e3e5;
-      padding-top: 1rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-    .bt-fbt-total-box {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      padding: 0.6rem 0.85rem;
-      background: #f6fbf9;
-      border: 1px solid #cce8de;
-      border-radius: 8px;
-    }
-    .bt-fbt-total-label {
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: #202223;
-    }
-    .bt-fbt-pricing {
-      display: flex;
-      align-items: baseline;
-      gap: 0.5rem;
-    }
-    .bt-fbt-bundle-price {
-      font-size: 1.25rem;
-      font-weight: 700;
-      color: #008060;
-    }
-    .bt-fbt-bundle-compare {
-      font-size: 0.9rem;
-      color: #8c9196;
-      text-decoration: line-through;
-    }
-    .bt-fbt-add-btn {
-      width: 100%;
-      padding: 0.9rem 1.25rem;
-      background: #008060;
-      color: #ffffff;
-      border: none;
-      border-radius: 8px;
-      font-size: 1rem;
-      font-weight: 700;
-      cursor: pointer;
-      transition: background 0.2s ease, transform 0.1s ease;
-    }
-    .bt-fbt-add-btn:hover {
-      background: #006e52;
-    }
-    .bt-fbt-add-btn:active {
-      transform: scale(0.99);
-    }
-    .bt-fbt-savings-note {
-      font-size: 0.85rem;
-      color: #008060;
-      font-weight: 600;
-      text-align: center;
-    }
-  </style>
+<div
+  class="bt-dual-widget-wrap"
+  id="bt-dual-wrap-{{ block.id }}"
+  data-product-id="{{ product.id }}"
+  data-variant-id="{{ product.selected_or_first_available_variant.id }}"
+  data-price="{{ product.selected_or_first_available_variant.price }}"
+  data-heading="{{ block.settings.header_title | default: 'Buy More, Save More' | escape }}"
+  data-subtitle="{{ block.settings.subtitle | escape }}"
+  style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
+>
+  <!-- 1. Volume Tier Widget (SSR if rules matched; otherwise dynamically hydrated by bundle-tier.js) -->
+  {% if has_volume_rule %}
+    <div
+      class="bt-widget-container bt-volume-widget"
+      id="bt-volume-widget-{{ block.id }}"
+      data-variant-id="{{ product.selected_or_first_available_variant.id }}"
+      data-product-id="{{ product.id }}"
+      style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
+    >
+      <div class="bt-widget-header">
+        <h3 class="bt-widget-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+            <line x1="7" y1="7" x2="7.01" y2="7"/>
+          </svg>
+          {{ block.settings.header_title | default: 'Buy More, Save More' }}
+        </h3>
+        {% if block.settings.subtitle != blank %}
+          <p class="bt-widget-subtitle">{{ block.settings.subtitle }}</p>
+        {% endif %}
+      </div>
 
-  <div class="bt-dual-widget-wrap" id="bt-dual-wrap-{{ block.id }}">
-    
-    <!-- 1. Volume Tier Widget (Renders if Product OR Collection Volume rule configured) -->
-    {% if has_volume_rule %}
-      <div
-        class="bt-widget-container bt-volume-widget"
-        id="bt-volume-widget-{{ block.id }}"
-        data-variant-id="{{ product.selected_or_first_available_variant.id }}"
-        data-product-id="{{ product.id }}"
-        style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
-      >
-        <div class="bt-widget-header">
-          <h3 class="bt-widget-title">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
-              <line x1="7" y1="7" x2="7.01" y2="7"/>
-            </svg>
-            {{ block.settings.header_title | default: 'Buy More, Save More' }}
-          </h3>
-          {% if block.settings.subtitle != blank %}
-            <p class="bt-widget-subtitle">{{ block.settings.subtitle }}</p>
-          {% endif %}
-        </div>
+      <div class="bt-tiers-list">
+        {% assign base_price = product.selected_or_first_available_variant.price %}
+        {% assign rendered_quantities = '' %}
+        {% assign card_counter = 0 %}
 
-        <div class="bt-tiers-list">
-          {% assign base_price = product.selected_or_first_available_variant.price %}
-          {% assign rendered_quantities = '' %}
-          {% assign card_counter = 0 %}
+        {% if matched_product_volume_rule != nil %}
+          {% for tier in matched_product_volume_rule.tiers %}
+            {% assign min_qty = tier.minQuantity | default: 1 %}
+            {% assign disc_pct = tier.discountPercent | default: 0 %}
+            {% assign original_total = base_price | times: min_qty %}
+            {% assign discount_multiplier = 100 | minus: disc_pct %}
+            {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+            {% assign per_item = discounted_total | divided_by: min_qty %}
+            {% assign card_counter = card_counter | plus: 1 %}
+            {% assign qty_key = ',' | append: min_qty | append: ',' %}
+            {% assign rendered_quantities = rendered_quantities | append: qty_key %}
 
-          <!-- Render Product-level tiers first if present -->
-          {% if matched_product_volume_rule != nil %}
-            {% for tier in matched_product_volume_rule.tiers %}
-              {% assign min_qty = tier.minQuantity | default: 1 %}
-              {% assign disc_pct = tier.discountPercent | default: 0 %}
+            <div
+              class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
+              data-min-qty="{{ min_qty }}"
+              data-discount="{{ disc_pct }}"
+              data-label="{{ tier.label | default: '' }}"
+            >
+              {% if forloop.index == 2 and forloop.length > 2 %}
+                <span class="bt-tier-badge">Most Popular</span>
+              {% elsif forloop.last and matched_collection_volume_rule == nil and forloop.length > 2 %}
+                <span class="bt-tier-badge">Best Value</span>
+              {% endif %}
+
+              <div class="bt-tier-radio-wrap">
+                <input
+                  type="radio"
+                  name="bt-volume-tier-{{ block.id }}"
+                  class="bt-tier-radio"
+                  {% if card_counter == 1 %}checked{% endif %}
+                >
+                <div class="bt-tier-info">
+                  <span class="bt-tier-name">
+                    Buy {{ min_qty }}
+                    {% if disc_pct > 0 %}
+                      &middot; Save {{ disc_pct }}%
+                    {% endif %}
+                  </span>
+                  <span class="bt-tier-per-item">{{ per_item | money }}/each</span>
+                </div>
+              </div>
+
+              <div class="bt-tier-pricing">
+                <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
+                {% if disc_pct > 0 %}
+                  <span class="bt-tier-price-compare">{{ original_total | money }}</span>
+                {% endif %}
+              </div>
+            </div>
+          {% endfor %}
+        {% endif %}
+
+        {% if matched_collection_volume_rule != nil %}
+          {% for tier in matched_collection_volume_rule.tiers %}
+            {% assign min_qty = tier.minQuantity | default: 1 %}
+            {% assign disc_pct = tier.discountPercent | default: 0 %}
+            {% assign qty_key = ',' | append: min_qty | append: ',' %}
+
+            {% unless rendered_quantities contains qty_key %}
               {% assign original_total = base_price | times: min_qty %}
               {% assign discount_multiplier = 100 | minus: disc_pct %}
               {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
               {% assign per_item = discounted_total | divided_by: min_qty %}
               {% assign card_counter = card_counter | plus: 1 %}
-              {% assign qty_key = ',' | append: min_qty | append: ',' %}
-              {% assign rendered_quantities = rendered_quantities | append: qty_key %}
 
               <div
                 class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
@@ -444,11 +157,7 @@
                 data-discount="{{ disc_pct }}"
                 data-label="{{ tier.label | default: '' }}"
               >
-                {% if forloop.index == 2 and forloop.length > 2 %}
-                  <span class="bt-tier-badge">Most Popular</span>
-                {% elsif forloop.last and matched_collection_volume_rule == nil and forloop.length > 2 %}
-                  <span class="bt-tier-badge">Best Value</span>
-                {% endif %}
+                <span class="bt-tier-badge">Best Value</span>
 
                 <div class="bt-tier-radio-wrap">
                   <input
@@ -475,248 +184,185 @@
                   {% endif %}
                 </div>
               </div>
-            {% endfor %}
-          {% endif %}
-
-          <!-- Render Collection-level tiers if not duplicate -->
-          {% if matched_collection_volume_rule != nil %}
-            {% for tier in matched_collection_volume_rule.tiers %}
-              {% assign min_qty = tier.minQuantity | default: 1 %}
-              {% assign disc_pct = tier.discountPercent | default: 0 %}
-              {% assign qty_key = ',' | append: min_qty | append: ',' %}
-
-              {% unless rendered_quantities contains qty_key %}
-                {% assign original_total = base_price | times: min_qty %}
-                {% assign discount_multiplier = 100 | minus: disc_pct %}
-                {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
-                {% assign per_item = discounted_total | divided_by: min_qty %}
-                {% assign card_counter = card_counter | plus: 1 %}
-
-                <div
-                  class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
-                  data-min-qty="{{ min_qty }}"
-                  data-discount="{{ disc_pct }}"
-                  data-label="{{ tier.label | default: '' }}"
-                >
-                  <span class="bt-tier-badge">Best Value</span>
-
-                  <div class="bt-tier-radio-wrap">
-                    <input
-                      type="radio"
-                      name="bt-volume-tier-{{ block.id }}"
-                      class="bt-tier-radio"
-                      {% if card_counter == 1 %}checked{% endif %}
-                    >
-                    <div class="bt-tier-info">
-                      <span class="bt-tier-name">
-                        Buy {{ min_qty }}
-                        {% if disc_pct > 0 %}
-                          &middot; Save {{ disc_pct }}%
-                        {% endif %}
-                      </span>
-                      <span class="bt-tier-per-item">{{ per_item | money }}/each</span>
-                    </div>
-                  </div>
-
-                  <div class="bt-tier-pricing">
-                    <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
-                    {% if disc_pct > 0 %}
-                      <span class="bt-tier-price-compare">{{ original_total | money }}</span>
-                    {% endif %}
-                  </div>
-                </div>
-              {% endunless %}
-            {% endfor %}
-          {% endif %}
-        </div>
-
-        <div class="bt-action-wrap">
-          <button type="button" class="bt-add-btn">Add To Cart</button>
-          <div class="bt-savings-summary"></div>
-        </div>
-
-        <script type="application/json" class="bt-config-data">
-          {
-            "hasTiers": true
-          }
-        </script>
+            {% endunless %}
+          {% endfor %}
+        {% endif %}
       </div>
+
+      <div class="bt-action-wrap">
+        <button type="button" class="bt-add-btn">Add To Cart</button>
+        <div class="bt-savings-summary"></div>
+      </div>
+    </div>
+  {% endif %}
+
+  <!-- 2. Frequently Bought Together Widget (SSR if configured) -->
+  {% if matched_fbt_rule != nil %}
+    {% assign base_variant = product.selected_or_first_available_variant %}
+    {% assign base_price = base_variant.price %}
+    {% assign main_disc_pct = matched_fbt_rule.mainDiscountPercent | default: 0 %}
+
+    {% assign initial_bundle_original = base_price %}
+    {% assign initial_bundle_total = base_price %}
+    {% if main_disc_pct > 0 %}
+      {% assign main_mult = 100 | minus: main_disc_pct %}
+      {% assign initial_bundle_total = base_price | times: main_mult | divided_by: 100 %}
     {% endif %}
+    {% for fbt in matched_fbt_rule.fbtProducts %}
+      {% assign f_price = fbt.priceCents | default: 0 %}
+      {% assign f_disc = fbt.discountPercent | default: 10 %}
+      {% assign f_mult = 100 | minus: f_disc %}
+      {% assign f_discounted = f_price | times: f_mult | divided_by: 100 %}
+      {% assign initial_bundle_original = initial_bundle_original | plus: f_price %}
+      {% assign initial_bundle_total = initial_bundle_total | plus: f_discounted %}
+    {% endfor %}
+    {% assign initial_savings = initial_bundle_original | minus: initial_bundle_total %}
+    {% assign total_items_count = matched_fbt_rule.fbtProducts.size | plus: 1 %}
 
-    <!-- 2. Frequently Bought Together Widget (Renders if FBT rule configured) -->
-    {% if matched_fbt_rule != nil %}
-      {% assign base_variant = product.selected_or_first_available_variant %}
-      {% assign base_price = base_variant.price %}
-      {% assign main_disc_pct = matched_fbt_rule.mainDiscountPercent | default: 0 %}
+    <div
+      class="bt-widget-container bt-fbt-widget"
+      id="bt-fbt-widget-{{ block.id }}"
+      data-base-variant-id="{{ base_variant.id }}"
+      data-base-price="{{ base_price }}"
+      data-base-discount="{{ main_disc_pct }}"
+      data-base-title="{{ product.title | escape }}"
+      style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
+    >
+      <div class="bt-widget-header">
+        <h3 class="bt-widget-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+          </svg>
+          Frequently Bought Together
+        </h3>
+        <p class="bt-widget-subtitle">Bundle these items together and save</p>
+      </div>
 
-      {% assign initial_bundle_original = base_price %}
-      {% assign initial_bundle_total = base_price %}
-      {% if main_disc_pct > 0 %}
-        {% assign main_mult = 100 | minus: main_disc_pct %}
-        {% assign initial_bundle_total = base_price | times: main_mult | divided_by: 100 %}
-      {% endif %}
-      {% for fbt in matched_fbt_rule.fbtProducts %}
-        {% assign f_price = fbt.priceCents | default: 0 %}
-        {% assign f_disc = fbt.discountPercent | default: 10 %}
-        {% assign f_mult = 100 | minus: f_disc %}
-        {% assign f_discounted = f_price | times: f_mult | divided_by: 100 %}
-        {% assign initial_bundle_original = initial_bundle_original | plus: f_price %}
-        {% assign initial_bundle_total = initial_bundle_total | plus: f_discounted %}
-      {% endfor %}
-      {% assign initial_savings = initial_bundle_original | minus: initial_bundle_total %}
-      {% assign total_items_count = matched_fbt_rule.fbtProducts.size | plus: 1 %}
-
-      <div
-        class="bt-widget-container bt-fbt-widget"
-        id="bt-fbt-widget-{{ block.id }}"
-        data-base-variant-id="{{ base_variant.id }}"
-        data-base-price="{{ base_price }}"
-        data-base-discount="{{ main_disc_pct }}"
-        data-base-title="{{ product.title | escape }}"
-        style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
-      >
-        <div class="bt-widget-header">
-          <h3 class="bt-widget-title">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
-              <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
-            </svg>
-            Frequently Bought Together
-          </h3>
-          <p class="bt-widget-subtitle">Bundle these items together and save</p>
+      <div class="bt-fbt-gallery">
+        <div class="bt-fbt-thumb-card is-base">
+          <div class="bt-fbt-thumb-wrap">
+            {% if product.featured_image %}
+              <img
+                src="{{ product.featured_image | image_url: width: 160 }}"
+                alt="{{ product.title | escape }}"
+                class="bt-fbt-img"
+                loading="lazy"
+                width="80"
+                height="80"
+              >
+            {% else %}
+              <div class="bt-fbt-no-img">Product</div>
+            {% endif %}
+          </div>
+          <span class="bt-fbt-thumb-label">This item</span>
+          {% if main_disc_pct > 0 %}
+            <span class="bt-fbt-thumb-badge">-{{ main_disc_pct }}%</span>
+          {% endif %}
         </div>
 
-        <!-- Product Thumbnails Gallery (Main + Companion Images) -->
-        <div class="bt-fbt-gallery">
-          <!-- Main / Trigger Product Image -->
-          <div class="bt-fbt-thumb-card is-base">
+        {% for fbt in matched_fbt_rule.fbtProducts %}
+          <div class="bt-fbt-plus-icon">+</div>
+          <div class="bt-fbt-thumb-card" data-fbt-card-id="{{ fbt.productId }}">
             <div class="bt-fbt-thumb-wrap">
-              {% if product.featured_image %}
+              {% if fbt.image != blank %}
                 <img
-                  src="{{ product.featured_image | image_url: width: 160 }}"
-                  alt="{{ product.title | escape }}"
+                  src="{{ fbt.image }}"
+                  alt="{{ fbt.title | escape }}"
                   class="bt-fbt-img"
                   loading="lazy"
                   width="80"
                   height="80"
                 >
               {% else %}
-                <div class="bt-fbt-no-img">Product</div>
+                <div class="bt-fbt-no-img">{{ fbt.title | slice: 0, 10 }}</div>
               {% endif %}
             </div>
-            <span class="bt-fbt-thumb-label">This item</span>
-            {% if main_disc_pct > 0 %}
-              <span class="bt-fbt-thumb-badge">-{{ main_disc_pct }}%</span>
-            {% endif %}
+            <span class="bt-fbt-thumb-badge">-{{ fbt.discountPercent | default: 10 }}%</span>
           </div>
+        {% endfor %}
+      </div>
 
-          <!-- Companion Images with '+' -->
-          {% for fbt in matched_fbt_rule.fbtProducts %}
-            <div class="bt-fbt-plus-icon">+</div>
-            <div class="bt-fbt-thumb-card" data-fbt-card-id="{{ fbt.productId }}">
-              <div class="bt-fbt-thumb-wrap">
-                {% if fbt.image != blank %}
-                  <img
-                    src="{{ fbt.image }}"
-                    alt="{{ fbt.title | escape }}"
-                    class="bt-fbt-img"
-                    loading="lazy"
-                    width="80"
-                    height="80"
-                  >
-                {% else %}
-                  <div class="bt-fbt-no-img">{{ fbt.title | slice: 0, 10 }}</div>
-                {% endif %}
-              </div>
-              <span class="bt-fbt-thumb-badge">-{{ fbt.discountPercent | default: 10 }}%</span>
-            </div>
-          {% endfor %}
-        </div>
+      <div class="bt-fbt-list">
+        <label class="bt-fbt-row is-base">
+          <input type="checkbox" checked disabled class="bt-fbt-checkbox bt-fbt-base-checkbox">
+          <span class="bt-fbt-check-label">
+            <strong>This item:</strong> {{ product.title }}
+            {% if main_disc_pct > 0 %}
+              <span class="bt-fbt-save-pill">Save {{ main_disc_pct }}%</span>
+            {% endif %}
+          </span>
+          <span class="bt-fbt-row-price">
+            {% if main_disc_pct > 0 %}
+              {% assign main_mult = 100 | minus: main_disc_pct %}
+              {% assign main_disc_price = base_price | times: main_mult | divided_by: 100 %}
+              <span class="bt-fbt-price-discounted">{{ main_disc_price | money }}</span>
+              <span class="bt-fbt-price-original">{{ base_price | money }}</span>
+            {% else %}
+              {{ base_price | money }}
+            {% endif %}
+          </span>
+        </label>
 
-        <!-- Checkboxes List -->
-        <div class="bt-fbt-list">
-          <!-- Base Product Row -->
-          <label class="bt-fbt-row is-base">
-            <input type="checkbox" checked disabled class="bt-fbt-checkbox bt-fbt-base-checkbox">
+        {% for fbt in matched_fbt_rule.fbtProducts %}
+          {% assign fbt_price_cents = fbt.priceCents | default: 0 %}
+          {% assign fbt_disc_pct = fbt.discountPercent | default: 10 %}
+          {% assign disc_mult = 100 | minus: fbt_disc_pct %}
+          {% assign fbt_disc_price = fbt_price_cents | times: disc_mult | divided_by: 100 %}
+
+          <label class="bt-fbt-row">
+            <input
+              type="checkbox"
+              checked
+              class="bt-fbt-checkbox bt-fbt-companion-checkbox"
+              data-product-id="{{ fbt.productId }}"
+              data-variant-id="{{ fbt.variantId }}"
+              data-title="{{ fbt.title | escape }}"
+              data-price="{{ fbt_price_cents }}"
+              data-discount="{{ fbt_disc_pct }}"
+            >
             <span class="bt-fbt-check-label">
-              <strong>This item:</strong> {{ product.title }}
-              {% if main_disc_pct > 0 %}
-                <span class="bt-fbt-save-pill">Save {{ main_disc_pct }}%</span>
-              {% endif %}
+              {{ fbt.title }}
+              <span class="bt-fbt-save-pill">Save {{ fbt_disc_pct }}%</span>
             </span>
             <span class="bt-fbt-row-price">
-              {% if main_disc_pct > 0 %}
-                {% assign main_mult = 100 | minus: main_disc_pct %}
-                {% assign main_disc_price = base_price | times: main_mult | divided_by: 100 %}
-                <span class="bt-fbt-price-discounted">{{ main_disc_price | money }}</span>
-                <span class="bt-fbt-price-original">{{ base_price | money }}</span>
+              {% if fbt_price_cents > 0 %}
+                <span class="bt-fbt-price-discounted">{{ fbt_disc_price | money }}</span>
+                <span class="bt-fbt-price-original">{{ fbt_price_cents | money }}</span>
               {% else %}
-                {{ base_price | money }}
+                <span class="bt-fbt-price-discounted">-{{ fbt_disc_pct }}%</span>
               {% endif %}
             </span>
           </label>
+        {% endfor %}
+      </div>
 
-          <!-- Companion Items Rows -->
-          {% for fbt in matched_fbt_rule.fbtProducts %}
-            {% assign fbt_price_cents = fbt.priceCents | default: 0 %}
-            {% assign fbt_disc_pct = fbt.discountPercent | default: 10 %}
-            {% assign disc_mult = 100 | minus: fbt_disc_pct %}
-            {% assign fbt_disc_price = fbt_price_cents | times: disc_mult | divided_by: 100 %}
-
-            <label class="bt-fbt-row">
-              <input
-                type="checkbox"
-                checked
-                class="bt-fbt-checkbox bt-fbt-companion-checkbox"
-                data-product-id="{{ fbt.productId }}"
-                data-variant-id="{{ fbt.variantId }}"
-                data-title="{{ fbt.title | escape }}"
-                data-price="{{ fbt_price_cents }}"
-                data-discount="{{ fbt_disc_pct }}"
-              >
-              <span class="bt-fbt-check-label">
-                {{ fbt.title }}
-                <span class="bt-fbt-save-pill">Save {{ fbt_disc_pct }}%</span>
-              </span>
-              <span class="bt-fbt-row-price">
-                {% if fbt_price_cents > 0 %}
-                  <span class="bt-fbt-price-discounted">{{ fbt_disc_price | money }}</span>
-                  <span class="bt-fbt-price-original">{{ fbt_price_cents | money }}</span>
-                {% else %}
-                  <span class="bt-fbt-price-discounted">-{{ fbt_disc_pct }}%</span>
-                {% endif %}
-              </span>
-            </label>
-          {% endfor %}
-        </div>
-
-        <!-- Bundle Pricing & 1-Click Action -->
-        <div class="bt-fbt-summary-wrap">
-          <div class="bt-fbt-total-box">
-            <div class="bt-fbt-total-label">Bundle Price:</div>
-            <div class="bt-fbt-pricing">
-              <span class="bt-fbt-bundle-price">{{ initial_bundle_total | money }}</span>
-              {% if initial_savings > 0 %}
-                <span class="bt-fbt-bundle-compare">{{ initial_bundle_original | money }}</span>
-              {% else %}
-                <span class="bt-fbt-bundle-compare"></span>
-              {% endif %}
-            </div>
-          </div>
-          <button type="button" class="bt-fbt-add-btn">
-            Add {{ total_items_count }} Items To Cart
-          </button>
-          <div class="bt-fbt-savings-note">
+      <div class="bt-fbt-summary-wrap">
+        <div class="bt-fbt-total-box">
+          <div class="bt-fbt-total-label">Bundle Price:</div>
+          <div class="bt-fbt-pricing">
+            <span class="bt-fbt-bundle-price">{{ initial_bundle_total | money }}</span>
             {% if initial_savings > 0 %}
-              Save {{ initial_savings | money }} with this bundle!
+              <span class="bt-fbt-bundle-compare">{{ initial_bundle_original | money }}</span>
+            {% else %}
+              <span class="bt-fbt-bundle-compare"></span>
             {% endif %}
           </div>
         </div>
+        <button type="button" class="bt-fbt-add-btn">
+          Add {{ total_items_count }} Items To Cart
+        </button>
+        <div class="bt-fbt-savings-note">
+          {% if initial_savings > 0 %}
+            Save {{ initial_savings | money }} with this bundle!
+          {% endif %}
+        </div>
       </div>
-    {% endif %}
+    </div>
+  {% endif %}
+</div>
 
-  </div>
-
+{% if config_data and config_data.rules %}
   <script>
     window.__btRules = {{ config_data.rules | json }};
     try {
@@ -725,8 +371,9 @@
       }
     } catch (e) {}
   </script>
-  <script src="{{ 'bundle-tier.js' | asset_url }}" defer></script>
 {% endif %}
+
+<script src="{{ 'bundle-tier.js' | asset_url }}" defer></script>
 
 {% schema %}
 {
