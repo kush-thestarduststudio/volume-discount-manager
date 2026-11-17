@@ -7,14 +7,25 @@ import { authenticate } from "../shopify.server";
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
 
-  const rawRules = await prisma.bundleRule.findMany({
-    where: { shop: session.shop },
-    orderBy: { createdAt: "desc" },
-  });
+  let rawRules = [];
+  try {
+    rawRules = await prisma.bundleRule.findMany({
+      where: { shop: session.shop },
+      orderBy: { createdAt: "desc" },
+    });
+  } catch (err) {
+    console.error("[Database Error in loader]:", err);
+    rawRules = [];
+  }
 
   return {
     rules: rawRules.map((r) => {
-      const parsedTiers = JSON.parse(r.tiers || "[]");
+      let parsedTiers = [];
+      try {
+        parsedTiers = JSON.parse(r.tiers || "[]");
+      } catch {
+        parsedTiers = [];
+      }
       let parsedFbt = [];
       let mainDiscountPercent = 0;
       try {

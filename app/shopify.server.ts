@@ -8,7 +8,7 @@ import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prism
 import prisma from "./db.server";
 
 const shopify = shopifyApp({
-  apiKey: process.env.SHOPIFY_API_KEY,
+  apiKey: process.env.SHOPIFY_API_KEY || "e57d0d801d6ad34806b952676b7056d7",
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
   apiVersion: ApiVersion.July26,
   scopes: process.env.SCOPES
@@ -21,7 +21,10 @@ const shopify = shopifyApp({
         "write_products",
         "write_themes",
       ],
-  appUrl: process.env.SHOPIFY_APP_URL || process.env.RENDER_EXTERNAL_URL || "",
+  appUrl:
+    process.env.SHOPIFY_APP_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    "https://volume-discount-manager.onrender.com",
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
   distribution: AppDistribution.AppStore,
