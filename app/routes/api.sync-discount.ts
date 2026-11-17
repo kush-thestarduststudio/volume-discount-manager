@@ -55,43 +55,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return res.json();
     };
 
-    // 1. Fetch functions
-    const funcData = await graphql(`
-      query {
-        shopifyFunctions(first: 25) {
-          nodes {
-            id
-            title
-            apiType
-          }
-        }
-      }
-    `);
-
-    // 2. Fetch existing discount nodes
-    const discountData = await graphql(`
-      query {
-        discountNodes(first: 50) {
-          nodes {
-            id
-            discount {
-              __typename
-              ... on DiscountAutomaticApp {
-                title
-                status
-                appDiscountType {
-                  functionId
-                }
-              }
-            }
-          }
-        }
-      }
-    `);
-
-    // 3. Fetch active rules from DB
+    // 1. Fetch active rules from DB
     const activeRules = await prisma.bundleRule.findMany({
-      where: { shop, active: true },
+      where: { active: true },
+      orderBy: { createdAt: "desc" },
     });
 
     const activeRulesPayload = activeRules.map((r) => {
@@ -125,7 +92,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       rules: activeRulesPayload,
     };
 
-    // 4. Update shop metafield
+    // 2. Update shop metafield
     const shopInfo = await graphql(`query { shop { id } }`);
     const shopGid = shopInfo?.data?.shop?.id;
     let metafieldSetResult = null;
@@ -158,86 +125,135 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       );
     }
 
-    // 5. Create or Update Discount Node
-    const existingNode = discountData?.data?.discountNodes?.nodes?.find(
+    // 3. Fetch existing automatic discount nodes
+    const discountData = await graphql(`
+      query {
+        discountNodes(first: 50) {
+          nodes {
+            id
+            discount {
+              __typename
+              ... on DiscountAutomaticBasic {
+                title
+                status
+              }
+              ... on DiscountAutomaticApp {
+                title
+                status
+              }
+            }
+          }
+        }
+      }
+    `);
+
+    const allNodes = discountData?.data?.discountNodes?.nodes || [];
+    const existingAppDiscounts = allNodes.filter(
       (n: any) =>
-        n.discount?.__typename === "DiscountAutomaticApp" &&
-        (n.discount?.title?.includes("Bundle & Tier") || n.discount?.title?.includes("Volume"))
+        (n.discount?.__typename === "DiscountAutomaticBasic" || n.discount?.__typename === "DiscountAutomaticApp") &&
+        (n.discount?.title?.startsWith("[Volume]") || n.discount?.title?.includes("Bundle & Tier"))
     );
 
-    let mutationResult = null;
-    const allFuncs = funcData?.data?.shopifyFunctions?.nodes || [];
-    const funcNode = allFuncs.find((n: any) =>
-      n.title?.toLowerCase().includes("bundle") ||
-      n.title?.toLowerCase().includes("tier") ||
-      n.title?.toLowerCase().includes("discount")
-    ) || allFuncs[0];
-
-    const REAL_FUNCTION_ID = funcNode?.id || "01a1e800-5a2a-70c1-891a-df5db2048e51";
-
-    if (existingNode) {
-      mutationResult = await graphql(
-        `mutation UpdateDiscount($id: ID!, $input: DiscountAutomaticAppInput!) {
-          discountAutomaticAppUpdate(id: $id, automaticAppDiscount: $input) {
-            automaticAppDiscount { discountId title }
-            userErrors { field message }
+    // Build expected discounts from currently active volume rules
+    const expectedDiscounts: any[] = [];
+    for (const rule of activeRulesPayload) {
+      if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
+        for (const tier of rule.tiers) {
+          if (tier.minQuantity > 0 && tier.discountPercent > 0) {
+            expectedDiscounts.push({
+              title: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
+              minQuantity: tier.minQuantity,
+              discountPercent: tier.discountPercent,
+              targetType: rule.targetType,
+              targetGid: rule.targetGid,
+            });
           }
-        }`,
-        {
-          id: existingNode.id,
-          input: {
-            title: "Bundle & Tier Automatic Discounts",
-            metafields: [
-              {
-                namespace: "$app:bundle_tiers",
-                key: "config",
-                type: "json",
-                value: JSON.stringify(configPayload),
-              },
-            ],
-          },
         }
+      }
+    }
+
+    // Delete outdated discounts
+    const deleteResults: any[] = [];
+    for (const oldNode of existingAppDiscounts) {
+      const stillNeeded = expectedDiscounts.some(
+        (exp) => exp.title === oldNode.discount?.title && oldNode.discount?.__typename === "DiscountAutomaticBasic"
       );
-    } else {
-      mutationResult = await graphql(
-        `mutation CreateDiscount($input: DiscountAutomaticAppInput!) {
-          discountAutomaticAppCreate(automaticAppDiscount: $input) {
-            automaticAppDiscount { discountId title }
-            userErrors { field message }
-          }
-        }`,
-        {
-          input: {
-            title: "Bundle & Tier Automatic Discounts",
-            functionId: REAL_FUNCTION_ID,
-            discountClasses: ["PRODUCT"],
-            startsAt: new Date().toISOString(),
-            combinesWith: {
-              orderDiscounts: true,
-              productDiscounts: true,
-              shippingDiscounts: true,
+      if (!stillNeeded) {
+        const delRes = await graphql(
+          `mutation DeleteDiscount($id: ID!) {
+            discountAutomaticDelete(id: $id) {
+              userErrors { field message }
+            }
+          }`,
+          { id: oldNode.id }
+        );
+        deleteResults.push({ id: oldNode.id, title: oldNode.discount?.title, res: delRes });
+      }
+    }
+
+    // Create missing native automatic discounts
+    const createResults: any[] = [];
+    for (const exp of expectedDiscounts) {
+      const alreadyExists = existingAppDiscounts.some(
+        (n: any) => n.discount?.title === exp.title && n.discount?.__typename === "DiscountAutomaticBasic"
+      );
+      if (!alreadyExists) {
+        const createRes = await graphql(
+          `mutation CreateNativeAutomaticDiscount($input: DiscountAutomaticBasicInput!) {
+            discountAutomaticBasicCreate(automaticBasicDiscount: $input) {
+              automaticDiscountNode {
+                id
+                automaticDiscount {
+                  ... on DiscountAutomaticBasic {
+                    title
+                    status
+                  }
+                }
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }`,
+          {
+            input: {
+              title: exp.title,
+              startsAt: new Date().toISOString(),
+              customerGets: {
+                value: {
+                  percentage: Number(exp.discountPercent) / 100,
+                },
+                items: exp.targetType === "COLLECTION"
+                  ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                  : { products: { productsToAdd: [exp.targetGid] } },
+              },
+              minimumRequirement: {
+                quantity: {
+                  greaterThanOrEqualToQuantity: String(exp.minQuantity),
+                },
+              },
+              combinesWith: {
+                orderDiscounts: true,
+                productDiscounts: false,
+                shippingDiscounts: true,
+              },
             },
-            metafields: [
-              {
-                namespace: "$app:bundle_tiers",
-                key: "config",
-                type: "json",
-                value: JSON.stringify(configPayload),
-              },
-            ],
-          },
-        }
-      );
+          }
+        );
+        createResults.push({ title: exp.title, result: createRes });
+      }
     }
 
     return new Response(
       JSON.stringify({
         ok: true,
         shop,
-        realFunctionId: REAL_FUNCTION_ID,
-        existingNodeId: existingNode?.id || null,
-        mutationResult,
-        metafieldSetResult,
+        planType: "GROW_OR_STANDARD_AUTOMATIC_DISCOUNT",
+        expectedDiscounts,
+        created: createResults,
+        deleted: deleteResults,
+        metafields: metafieldSetResult,
       }, null, 2),
       { headers }
     );

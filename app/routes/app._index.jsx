@@ -345,152 +345,152 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       }
     }
 
-    // 3. Update existing Automatic Discount or Create if not present
+    // 2. Sync Native Shopify Automatic Discounts (100% Native on Shopify Grow, Basic, Advanced, Plus!)
     try {
-      const discountNodesRes = await admin.graphql(`
-        query GetAppDiscounts {
-          discountNodes(first: 25) {
+      const discountRes = await admin.graphql(`
+        query GetAutomaticDiscounts {
+          discountNodes(first: 50) {
             nodes {
               id
               discount {
                 __typename
+                ... on DiscountAutomaticBasic {
+                  title
+                  status
+                }
                 ... on DiscountAutomaticApp {
                   title
                   status
-                  appDiscountType {
-                    functionId
-                  }
                 }
               }
             }
           }
         }
       `);
-      const discountNodesJson = await discountNodesRes.json();
-      const existingAppDiscount = discountNodesJson?.data?.discountNodes?.nodes?.find(
-        (n) =>
-          n.discount?.__typename === "DiscountAutomaticApp" &&
-          (n.discount?.title?.includes("Bundle & Tier") || n.discount?.title?.includes("Volume"))
+      const discountJson = await discountRes.json();
+      const allNodes = discountJson?.data?.discountNodes?.nodes || [];
+
+      // Find all existing [Volume] or app automatic discounts
+      const existingAppDiscounts = allNodes.filter(
+        (n) => (n.discount?.__typename === "DiscountAutomaticBasic" || n.discount?.__typename === "DiscountAutomaticApp") &&
+               (n.discount?.title?.startsWith("[Volume]") || n.discount?.title?.includes("Bundle & Tier"))
       );
 
-      if (existingAppDiscount) {
-        // UPDATE existing discount node with the latest active rules
-        const updateRes = await admin.graphql(
-          `mutation UpdateAppDiscount($id: ID!, $automaticAppDiscount: DiscountAutomaticAppInput!) {
-            discountAutomaticAppUpdate(id: $id, automaticAppDiscount: $automaticAppDiscount) {
-              automaticAppDiscount {
-                discountId
-                title
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`,
-          {
-            variables: {
-              id: existingAppDiscount.id,
-              automaticAppDiscount: {
-                title: "Bundle & Tier Automatic Discounts",
-                metafields: [
-                  {
-                    namespace: "$app:bundle_tiers",
-                    key: "config",
-                    type: "json",
-                    value: JSON.stringify(configPayload),
-                  },
-                ],
-              },
-            },
-          }
-        );
-        const updateJson = await updateRes.json();
-        console.log("[ShopifyFunction] Updated discount node:", JSON.stringify(updateJson));
-        const uErrors = updateJson?.data?.discountAutomaticAppUpdate?.userErrors;
-        if (uErrors && uErrors.length > 0) {
-          discountStatus = `UPDATE_ERROR: ${uErrors.map((e) => e.message).join(", ")}`;
-        } else {
-          discountStatus = `ACTIVE (ID: ${existingAppDiscount.id})`;
-        }
-      } else {
-        // CREATE new discount node
-        const functionsRes = await admin.graphql(`
-          query GetFunctions {
-            shopifyFunctions(first: 25) {
-              nodes {
-                id
-                title
-                apiType
-              }
+      // Build expected discounts from currently active volume rules
+      const expectedDiscounts = [];
+      for (const rule of activeRulesPayload) {
+        if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
+          for (const tier of rule.tiers) {
+            if (tier.minQuantity > 0 && tier.discountPercent > 0) {
+              expectedDiscounts.push({
+                title: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
+                minQuantity: tier.minQuantity,
+                discountPercent: tier.discountPercent,
+                targetType: rule.targetType,
+                targetGid: rule.targetGid,
+              });
             }
           }
-        `);
-        const functionsJson = await functionsRes.json();
-        const allFuncs = functionsJson?.data?.shopifyFunctions?.nodes || [];
-        console.log("[ShopifyFunction] Available functions:", JSON.stringify(allFuncs));
-        const funcNode =
-          allFuncs.find(
-            (n) =>
-              (n.title && n.title.toLowerCase().includes("bundle")) ||
-              (n.title && n.title.toLowerCase().includes("tier")) ||
-              (n.title && n.title.toLowerCase().includes("discount")) ||
-              (n.apiType && n.apiType.toLowerCase().includes("discount"))
-          ) || allFuncs[0];
-
-        const REAL_FUNCTION_ID = funcNode?.id || "01a1e800-5a2a-70c1-891a-df5db2048e51";
-
-        console.log("[ShopifyFunction] Registering discount with functionId:", REAL_FUNCTION_ID);
-
-        let createRes = await admin.graphql(
-          `mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
-            discountAutomaticAppCreate(automaticAppDiscount: $automaticAppDiscount) {
-              automaticAppDiscount {
-                discountId
-                title
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }`,
-          {
-            variables: {
-              automaticAppDiscount: {
-                title: "Bundle & Tier Automatic Discounts",
-                functionId: REAL_FUNCTION_ID,
-                discountClasses: ["PRODUCT"],
-                startsAt: new Date().toISOString(),
-                combinesWith: {
-                  orderDiscounts: true,
-                  productDiscounts: true,
-                  shippingDiscounts: true,
-                },
-                metafields: [
-                  {
-                    namespace: "$app:bundle_tiers",
-                    key: "config",
-                    type: "json",
-                    value: JSON.stringify(configPayload),
-                  },
-                ],
-              },
-            },
-          }
-        );
-        let createJson = await createRes.json();
-        console.log("[ShopifyFunction] Created discount node response:", JSON.stringify(createJson));
-
-        let cErrors = createJson?.data?.discountAutomaticAppCreate?.userErrors;
-        if (cErrors && cErrors.length > 0) {
-          discountStatus = `CREATE_ERROR: ${cErrors.map((e) => e.message).join(", ")}`;
-        } else if (createJson?.data?.discountAutomaticAppCreate?.automaticAppDiscount?.discountId) {
-          discountStatus = `ACTIVE (Created ID: ${createJson.data.discountAutomaticAppCreate.automaticAppDiscount.discountId})`;
         }
       }
+
+      // Delete outdated app discounts (or old leftover function discounts)
+      for (const oldNode of existingAppDiscounts) {
+        const stillNeeded = expectedDiscounts.some(
+          (exp) => exp.title === oldNode.discount?.title && oldNode.discount?.__typename === "DiscountAutomaticBasic"
+        );
+        if (!stillNeeded) {
+          console.log(`[Grow Plan Native Sync] Removing outdated discount: ${oldNode.discount?.title}`);
+          await admin.graphql(
+            `mutation DeleteDiscount($id: ID!) {
+              discountAutomaticDelete(id: $id) {
+                userErrors { field message }
+              }
+            }`,
+            { variables: { id: oldNode.id } }
+          );
+        }
+      }
+
+      // Create expected discounts that don't already exist
+      let activeCount = 0;
+      let lastErrorMessage = "";
+      for (const exp of expectedDiscounts) {
+        const alreadyExists = existingAppDiscounts.some(
+          (n) => n.discount?.title === exp.title && n.discount?.__typename === "DiscountAutomaticBasic"
+        );
+        if (alreadyExists) {
+          activeCount++;
+        } else {
+          const createRes = await admin.graphql(
+            `mutation CreateNativeAutomaticDiscount($input: DiscountAutomaticBasicInput!) {
+              discountAutomaticBasicCreate(automaticBasicDiscount: $input) {
+                automaticDiscountNode {
+                  id
+                  automaticDiscount {
+                    ... on DiscountAutomaticBasic {
+                      title
+                      status
+                    }
+                  }
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }`,
+            {
+              variables: {
+                input: {
+                  title: exp.title,
+                  startsAt: new Date().toISOString(),
+                  customerGets: {
+                    value: {
+                      percentage: Number(exp.discountPercent) / 100,
+                    },
+                    items: exp.targetType === "COLLECTION"
+                      ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                      : { products: { productsToAdd: [exp.targetGid] } },
+                  },
+                  minimumRequirement: {
+                    quantity: {
+                      greaterThanOrEqualToQuantity: String(exp.minQuantity),
+                    },
+                  },
+                  combinesWith: {
+                    orderDiscounts: true,
+                    productDiscounts: false,
+                    shippingDiscounts: true,
+                  },
+                },
+              },
+            }
+          );
+          const createJson = await createRes.json();
+          const errors = createJson?.data?.discountAutomaticBasicCreate?.userErrors;
+          const gqlErrors = createJson?.errors;
+          if (gqlErrors && gqlErrors.length > 0) {
+            lastErrorMessage = gqlErrors.map((e) => e.message).join(", ");
+            console.warn("[Grow Plan Native Sync] GraphQL Errors:", gqlErrors);
+          } else if (errors && errors.length > 0) {
+            lastErrorMessage = errors.map((e) => e.message).join(", ");
+            console.warn("[Grow Plan Native Sync] UserErrors:", errors);
+          } else {
+            activeCount++;
+          }
+        }
+      }
+
+      if (lastErrorMessage) {
+        discountStatus = `CREATE_ERROR: ${lastErrorMessage}`;
+      } else if (expectedDiscounts.length === 0) {
+        discountStatus = "No active volume tiers configured yet. Click 'Create Volume Discount' to get started!";
+      } else {
+        discountStatus = `ACTIVE (${activeCount} native Shopify automatic discount tier(s) running live)`;
+      }
     } catch (fnErr) {
-      console.error("[ShopifyFunction] Error:", fnErr.message || fnErr);
+      console.error("[Shopify Discount Sync] Error:", fnErr.message || fnErr);
       discountStatus = `ERROR: ${fnErr.message || String(fnErr)}`;
     }
   } catch (syncErr) {
