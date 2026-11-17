@@ -13,36 +13,22 @@ export const loader = async ({ request }) => {
       where: { shop: session.shop },
       orderBy: { createdAt: "desc" },
     });
-    if (rawRules.length === 0) {
-      const seeded = await prisma.bundleRule.create({
-        data: {
-          shop: session.shop,
-          title: "Volume Tier: test",
-          targetType: "PRODUCT",
-          targetGid: "gid://shopify/Product/7488883753012",
-          tiers: JSON.stringify([
-            { minQuantity: 2, discountPercent: 10, label: "Buy 2 - Save 10%" },
-            { minQuantity: 4, discountPercent: 15, label: "Buy 4 - Save 15%" },
-          ]),
-          fbtProducts: "[]",
-          active: true,
-        },
-      });
-      rawRules = [seeded];
-    }
   } catch (err) {
     console.error("[Database Error in loader]:", err);
     rawRules = [];
   }
 
   // Auto-sync metafields and automatic discount node on every load so Shopify is always up to date
+  let discountStatus = "UNKNOWN";
   try {
-    await syncShopifyDiscountAndMetafields(admin, session.shop);
+    discountStatus = await syncShopifyDiscountAndMetafields(admin, session.shop);
   } catch (syncErr) {
     console.error("[AutoSync in loader error]:", syncErr);
+    discountStatus = `SYNC_ERROR: ${syncErr.message || String(syncErr)}`;
   }
 
   return {
+    discountStatus,
     rules: rawRules.map((r) => {
       let parsedTiers = [];
       try {
@@ -207,18 +193,20 @@ export const action = async ({ request }) => {
       }
     } else if (intent === "delete_rule") {
       const id = formData.get("id");
-      let existing = id ? await prisma.bundleRule.findUnique({ where: { id } }) : null;
-      if (existing) {
-        await prisma.bundleRule.delete({
-          where: { id: existing.id },
+      if (id) {
+        await prisma.bundleRule.deleteMany({
+          where: { id, shop: session.shop },
         });
       }
+    } else if (intent === "sync_discounts") {
+      const status = await syncShopifyDiscountAndMetafields(admin, session.shop);
+      return { ok: true, message: `Discounts synced! Status: ${status}` };
     }
 
     // Sync all active rules to Shopify Shop Metafield & Automatic Discount
-    await syncShopifyDiscountAndMetafields(admin, session.shop);
+    const syncStatus = await syncShopifyDiscountAndMetafields(admin, session.shop);
 
-    return { ok: true, message: "Campaign saved and synced to Shopify successfully!" };
+    return { ok: true, message: "Campaign saved and synced to Shopify successfully! Status: " + syncStatus };
   } catch (err) {
     console.error("[ActionError]", err);
     return { ok: false, error: err.message || "An unexpected error occurred." };
@@ -392,6 +380,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               automaticAppDiscount {
                 discountId
                 title
+                status
               }
               userErrors {
                 field
@@ -418,6 +407,12 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         );
         const updateJson = await updateRes.json();
         console.log("[ShopifyFunction] Updated discount node:", JSON.stringify(updateJson));
+        const uErrors = updateJson?.data?.discountAutomaticAppUpdate?.userErrors;
+        if (uErrors && uErrors.length > 0) {
+          discountStatus = `UPDATE_ERROR: ${uErrors.map((e) => e.message).join(", ")}`;
+        } else {
+          discountStatus = `ACTIVE (ID: ${existingAppDiscount.id})`;
+        }
       } else {
         // CREATE new discount node
         const functionsRes = await admin.graphql(`
@@ -443,14 +438,63 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               (n.apiType && n.apiType.toLowerCase().includes("discount"))
           ) || allFuncs[0];
 
-        if (funcNode) {
-          console.log("[ShopifyFunction] Registering discount with function:", funcNode.id, funcNode.title);
-          const createRes = await admin.graphql(
+        const KNOWN_FUNCTION_UID = "1adaf086-d811-a3a8-cb96-c55528d9406fa1937df5";
+        const functionId = funcNode?.id || `gid://shopify/ShopifyFunction/${KNOWN_FUNCTION_UID}`;
+
+        console.log("[ShopifyFunction] Registering discount with functionId:", functionId);
+
+        let createRes = await admin.graphql(
+          `mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
+            discountAutomaticAppCreate(automaticAppDiscount: $automaticAppDiscount) {
+              automaticAppDiscount {
+                discountId
+                title
+                status
+              }
+              userErrors {
+                field
+                message
+              }
+            }
+          }`,
+          {
+            variables: {
+              automaticAppDiscount: {
+                title: "Bundle & Tier Automatic Discounts",
+                functionId,
+                discountClasses: ["PRODUCT"],
+                startsAt: new Date().toISOString(),
+                combinesWith: {
+                  orderDiscounts: true,
+                  productDiscounts: true,
+                  shippingDiscounts: true,
+                },
+                metafields: [
+                  {
+                    namespace: "$app:bundle_tiers",
+                    key: "config",
+                    type: "json",
+                    value: JSON.stringify(configPayload),
+                  },
+                ],
+              },
+            },
+          }
+        );
+        let createJson = await createRes.json();
+        console.log("[ShopifyFunction] Created discount node response:", JSON.stringify(createJson));
+
+        // If userErrors say functionId is invalid with GID, retry with raw UUID:
+        let cErrors = createJson?.data?.discountAutomaticAppCreate?.userErrors;
+        if (cErrors && cErrors.length > 0) {
+          console.warn("[ShopifyFunction] Retrying create with raw UUID functionId...");
+          createRes = await admin.graphql(
             `mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
               discountAutomaticAppCreate(automaticAppDiscount: $automaticAppDiscount) {
                 automaticAppDiscount {
                   discountId
                   title
+                  status
                 }
                 userErrors {
                   field
@@ -462,7 +506,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               variables: {
                 automaticAppDiscount: {
                   title: "Bundle & Tier Automatic Discounts",
-                  functionId: funcNode.id,
+                  functionId: KNOWN_FUNCTION_UID,
                   discountClasses: ["PRODUCT"],
                   startsAt: new Date().toISOString(),
                   combinesWith: {
@@ -482,22 +526,30 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               },
             }
           );
-          const createJson = await createRes.json();
-          console.log("[ShopifyFunction] Created discount node response:", JSON.stringify(createJson));
-        } else {
-          console.warn("[ShopifyFunction] No shopifyFunction found to register automatic discount.");
+          createJson = await createRes.json();
+          console.log("[ShopifyFunction] Created discount node response (UUID retry):", JSON.stringify(createJson));
+        }
+
+        cErrors = createJson?.data?.discountAutomaticAppCreate?.userErrors;
+        if (cErrors && cErrors.length > 0) {
+          discountStatus = `CREATE_ERROR: ${cErrors.map((e) => e.message).join(", ")}`;
+        } else if (createJson?.data?.discountAutomaticAppCreate?.automaticAppDiscount?.discountId) {
+          discountStatus = `ACTIVE (Created ID: ${createJson.data.discountAutomaticAppCreate.automaticAppDiscount.discountId})`;
         }
       }
     } catch (fnErr) {
-      console.log("[ShopifyFunction] Error:", fnErr.message || fnErr);
+      console.error("[ShopifyFunction] Error:", fnErr.message || fnErr);
+      discountStatus = `ERROR: ${fnErr.message || String(fnErr)}`;
     }
   } catch (syncErr) {
     console.error("[syncShopifyDiscountAndMetafields] Error:", syncErr);
+    discountStatus = `SYNC_ERROR: ${syncErr.message || String(syncErr)}`;
   }
+  return discountStatus;
 }
 
 export default function BundleTierIndex() {
-  const { rules } = useLoaderData();
+  const { rules, discountStatus } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
@@ -729,19 +781,42 @@ export default function BundleTierIndex() {
     }
   };
 
+  const handleSyncDiscounts = () => {
+    const fd = new FormData();
+    fd.append("intent", "sync_discounts");
+    fetcher.submit(fd, { method: "POST" });
+  };
+
   return (
     <s-page heading="Bundle &amp; Tier Discounts">
-      {activeTab === "volume" ? (
-        <s-button slot="primary-action" variant="primary" onClick={openCreateVolumeModal}>
-          Create Volume Discount
+      <s-stack slot="primary-action" direction="inline" gap="tight">
+        <s-button onClick={handleSyncDiscounts} loading={fetcher.state === "submitting"}>
+          Sync to Shopify
         </s-button>
-      ) : (
-        <s-button slot="primary-action" variant="primary" onClick={openCreateFbtModal}>
-          Create FBT Bundle
-        </s-button>
-      )}
+        {activeTab === "volume" ? (
+          <s-button variant="primary" onClick={openCreateVolumeModal}>
+            Create Volume Discount
+          </s-button>
+        ) : (
+          <s-button variant="primary" onClick={openCreateFbtModal}>
+            Create FBT Bundle
+          </s-button>
+        )}
+      </s-stack>
 
       <s-stack direction="block" gap="base">
+        {discountStatus && (
+          <s-banner
+            tone={discountStatus.startsWith("ACTIVE") ? "success" : "warning"}
+            heading={discountStatus.startsWith("ACTIVE") ? "Shopify Automatic Discounts: Active" : "Shopify Discounts Status"}
+          >
+            <s-text>
+              {discountStatus.startsWith("ACTIVE")
+                ? "Discounts are registered with Shopify Functions and active on cart & checkout."
+                : discountStatus}
+            </s-text>
+          </s-banner>
+        )}
         {/* Tab Switcher */}
         <div style={{ display: "flex", gap: "8px", borderBottom: "1px solid #d2d5d8", paddingBottom: "12px" }}>
           <button

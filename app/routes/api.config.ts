@@ -102,10 +102,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       };
     });
 
-    if (!parsedRules.length) {
-      parsedRules = FALLBACK_RULES;
-    }
-
     return new Response(
       JSON.stringify({
         ok: true,

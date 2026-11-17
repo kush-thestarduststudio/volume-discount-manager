@@ -50,7 +50,7 @@
 {% endif %}
 
 {% assign is_editor_preview = false %}
-{% if request.design_mode or product.handle == 'test' or current_product_id_str contains '7488883753012' %}
+{% if request.design_mode %}
   {% assign is_editor_preview = true %}
 {% endif %}
 

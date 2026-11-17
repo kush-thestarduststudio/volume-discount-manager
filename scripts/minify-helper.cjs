@@ -1,0 +1,283 @@
+const esbuild = require('esbuild');
+const fs = require('fs');
+
+const code = `"use strict";(()=>{
+if(window.__btEngineLoaded)return;
+window.__btEngineLoaded=!0;
+const A="//volume-discount-manager.onrender.com/api/config",
+      C=window.Shopify?.routes?.root||"/",
+      O={"Content-Type":"application/json"},
+      l=(t,e=document)=>e.querySelector(t),
+      M=(t,e=document)=>[...e.querySelectorAll(t)],
+      S=(t,e)=>fetch(C+t+"?_bt_internal=1",{method:"POST",headers:O,body:JSON.stringify(e)}),
+      v=t=>"\u20B9"+(t/100).toFixed(2),
+      x=t=>/cart\\/(change|add|update|clear)/.test(t)&&!t.includes("_bt_internal"),
+      I=[],
+      E={_tier_split:"regular"};
+
+function B(){
+  const t=[document];
+  try{
+    M("*").forEach(e=>{e.shadowRoot&&!t.includes(e.shadowRoot)&&t.push(e.shadowRoot)});
+    M("iframe").forEach(e=>{try{e.contentDocument&&!t.includes(e.contentDocument)&&t.push(e.contentDocument)}catch{}});
+  }catch{}
+  return t;
+}
+
+function F(){
+  try{
+    B().forEach(t=>{
+      if(t!==document&&!t._btO){
+        t._btO=!0;
+        try{new MutationObserver(()=>q()).observe(t,{childList:!0,subtree:!0})}catch{}
+        if(!t.querySelector?.("#bt-sh-st")){
+          const e=document.createElement("style");e.id="bt-sh-st";
+          e.textContent=".bt-sr-badge{background:#e6f4ea;color:#137333;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px;display:inline-block;margin:4px 0}.bt-sr-disc{color:#008060;font-weight:700}.bt-sr-orig{color:#888;text-decoration:line-through;margin-left:4px}";
+          (t.head||t).appendChild(e);
+        }
+      }
+    });
+  }catch{}
+}
+
+function q(){
+  try{
+    F();
+    const t=window.__btCartItems||[],e=window.__btRules||I;
+    let n=0;
+    t.forEach(r=>{
+      const i=String(r.product_id||""),
+            s=e.filter(c=>c.active&&(c.targetType==="PRODUCT"?String(c.targetGid||"").includes(i):(c.collectionProductIds||[]).map(String).includes(i))).flatMap(c=>c.tiers||[]).filter(c=>c.minQuantity&&c.discountPercent),
+            u=r.quantity||0;
+      let m=null;
+      for(const c of s)u>=c.minQuantity&&(!m||c.discountPercent>m.discountPercent)&&(m=c);
+      if(!r.properties?._tier_split&&!m)return;
+      const y=m?m.discountPercent:10,
+            p=m?m.minQuantity:2,
+            o=r.properties?.Discount||("Buy "+p+" - Save "+y+"%"),
+            h=r.original_line_price||r.price*u,
+            w=Math.round(h*(100-y)/100);
+      n+=h-w;
+      B().forEach(c=>{
+        M('.mini-cart-item,[id*="sr-cart-item-"],[class*="cart-item"]',c).forEach(d=>{
+          const b=(d.textContent||"").toLowerCase();
+          if((r.title&&b.includes(r.title.toLowerCase()))||b.includes("test")){
+            if(!d.querySelector(".bt-sr-badge")){
+              const g=document.createElement("div");
+              g.className="bt-sr-badge";
+              g.textContent="\u2713 "+o+" Applied!";
+              const $=l(".mini-cart-item-title,.variant-name,[class*='title'],h4,h3,p",d)||d;
+              $?.parentNode&&$.parentNode.insertBefore(g,$.nextSibling);
+            }
+            M('.mini-cart-item-price,[id*="price"],[class*="price"]',d).forEach(g=>{
+              if(!g.dataset.btU){
+                g.dataset.btU="1";
+                g.innerHTML='<span class="bt-sr-disc">'+v(w)+'</span> <s class="bt-sr-orig">'+v(h)+'</s>';
+              }
+            });
+          }
+        });
+        if(n>0){
+          M(".total-price,.sr-sub-total,[class*='total-price']",c).forEach(d=>{
+            d.dataset.btOrig||(d.dataset.btOrig=d.textContent);
+            const b=parseFloat(d.dataset.btOrig.replace(/[^\\d.]/g,""))||0;
+            if(b>0){
+              d.innerHTML='<span>'+v((b-n/100)*100)+'</span> <s style="font-size:11px;color:#888;margin-left:4px;">'+d.dataset.btOrig+'</s>';
+            }
+          });
+        }
+      });
+    });
+  }catch{}
+}
+
+function D(){
+  ["cart:refresh","cart:updated"].forEach(e=>{
+    const n=new CustomEvent(e,{bubbles:!0});window.dispatchEvent(n);document.dispatchEvent(n);
+  });
+  try{[window.Shiprocket,window.Fastrr?.cart,window.Fastrr,window.shiprocketCheckout,window.shiprocketSmartCart].forEach(e=>e?.refreshCart?.()||e?.refresh?.()||e?.updateCart?.())}catch{}
+  const t=l("cart-drawer");
+  typeof t?.renderContents=="function"?fetch(C+"?sections=cart-drawer,cart-icon-bubble").then(e=>e.json()).then(e=>{t.renderContents({sections:e});t.open?.()}).catch(()=>{}):window.location.pathname.includes("/cart")&&window.location.reload();
+  [200,800].forEach(e=>setTimeout(q,e));
+}
+
+async function Q(){
+  if(window.__btRules?.length)return window.__btRules;
+  try{
+    const t=window.Shopify?.shop||window.location.hostname,
+          n=await(await fetch(A+"?shop="+encodeURIComponent(t))).json();
+    if(n?.ok&&Array.isArray(n.rules))return window.__btRules=n.rules;
+  }catch{}
+  return window.__btRules=I;
+}
+
+let _=!1;
+async function U(){
+  if(_)return;
+  const t=await Q();
+  if(!t)return;
+  try{
+    const e=await fetch(C+"cart.js?_bt_internal=1");
+    if(!e.ok)return;
+    const n=await e.json();
+    if(!n?.items?.length)return;
+    window.__btCartItems=n.items;
+    const r={};
+    n.items.forEach(f=>{
+      if(f.properties?._bundle==="fbt_companion")return;
+      const s=String(f.product_id);(r[s]=r[s]||[]).push(f);
+    });
+    let i=!1;
+    for(const f in r){
+      const s=r[f],
+            u=t.filter(a=>a.active&&(a.targetType==="PRODUCT"?String(a.targetGid||"").includes(f):(a.collectionProductIds||[]).map(String).includes(f)));
+      if(!u.length)continue;
+      const m=u.flatMap(a=>a.tiers||[]).filter(a=>a.minQuantity&&a.discountPercent);
+      if(!m.length)continue;
+      const y=s.reduce((a,k)=>a+(k.quantity||0),0);
+      let p=null;
+      for(const a of m)y>=a.minQuantity&&(!p||a.discountPercent>p.discountPercent)&&(p=a);
+      const o=a=>a.properties?._tier_split;
+      if(!p){
+        const a=s.find(k=>o(k)==="discounted");
+        if(a){_=!0;await S("cart/change.js",{id:a.key,quantity:a.quantity,properties:E});i=!0;}
+        continue;
+      }
+      const h=p.minQuantity,w=y-h,c=p.label||("Buy "+h+" - Save "+p.discountPercent+"%"),
+            d=s.find(a=>o(a)==="discounted")||(s[0].quantity>=h?s[0]:null),
+            b=s.find(a=>a!==d&&o(a)!=="discounted"),
+            g=d?d.quantity:0,$=b?b.quantity:0;
+      if(g===h&&$===w&&d?.properties?.Discount===c)continue;
+      _=!0;
+      if(d)await S("cart/change.js",{id:d.key,quantity:h,properties:{_tier_split:"discounted",Discount:c}});
+      if(w>0){
+        b?await S("cart/change.js",{id:b.key,quantity:w,properties:E}):S("cart/add.js",{items:[{id:(d||s[0]).variant_id,quantity:w,properties:E}]});
+      }else if(b){
+        await S("cart/change.js",{id:b.key,quantity:0});
+      }
+      i=!0;
+    }
+    i?(D(),setTimeout(()=>{_=!1},800)):(_=!1,q());
+  }catch{_=!1}
+}
+
+let P=null;
+function R(){P&&clearTimeout(P);P=setTimeout(U,250)}
+if(!window.__btFetchPatched){
+  window.__btFetchPatched=!0;const t=window.fetch;
+  window.fetch=async function(...e){
+    const n=await t.apply(this,e);
+    try{x(typeof e[0]=="string"?e[0]:e[0]?.url||"")&&R()}catch{}
+    return n;
+  };
+}
+if(!window.__btXhrPatched){
+  window.__btXhrPatched=!0;
+  const t=XMLHttpRequest.prototype.open,e=XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open=function(n,r,...i){this._btU=typeof r=="string"?r:"";return t.apply(this,[n,r,...i])};
+  XMLHttpRequest.prototype.send=function(...n){this.addEventListener("load",()=>{try{x(this._btU||"")&&R()}catch{}});return e.apply(this,n)};
+}
+
+function j(t,e){
+  const n=l('form[action*="/cart/add"]')||l(".product-form")||l("product-form");
+  if(!n)return;
+  const r=n.querySelector('[name="quantity"]');if(r)r.value=t;
+  const i=(f,s)=>{
+    let u=n.querySelector('input[name="properties['+f+']"]');
+    if(!u){u=document.createElement("input");u.type="hidden";u.name='properties['+f+']';n.appendChild(u)}
+    u.value=s;
+  };
+  i("Discount",e);i("_tier_split","discounted");
+}
+
+function L(t){
+  const e=M(".bt-tier-card",t),n=l(".bt-add-btn",t),r=l(".bt-savings-summary",t);
+  let i=e[0]?{q:+e[0].dataset.minQty||1,p:+e[0].dataset.discount||0}:null;
+  e.forEach(s=>s.addEventListener("click",()=>{
+    e.forEach(m=>m.classList.remove("is-selected"));
+    const u=l(".bt-tier-radio",s);if(u)u.checked=!0;
+    s.classList.add("is-selected");
+    i={q:+s.dataset.minQty||1,p:+s.dataset.discount||0};
+    j(i.q,"Buy "+i.q+" - Save "+i.p+"%");
+    f();
+  }));
+  function f(){
+    if(n&&i){
+      n.textContent="Add "+i.q+" to Cart "+(i.p?"("+i.p+"% OFF)":"");
+      if(r)r.textContent=i.p?"Save "+i.p+"%!":"";
+    }
+  }
+  if(n){
+    n.addEventListener("click",async s=>{
+      if(s.preventDefault(),n.disabled)return;
+      const u=t.dataset.variantId||l('[name="id"]')?.value;
+      if(!u)return alert("Select variant");
+      const m=+String(u).replace(/\\D/g,"");
+      n.disabled=!0;
+      try{
+        const y=i?i.q:1,p=i?i.p:0,o="Buy "+y+" - Save "+p+"%";
+        if(!(await fetch(C+"cart/add.js",{method:"POST",headers:O,body:JSON.stringify({items:[{id:m,quantity:y,properties:{_tier_split:"discounted",Discount:o}}]})})).ok)throw new Error;
+        D();n.textContent="\u2713 Added!";
+        setTimeout(()=>{n.disabled=!1;f()},1500);
+      }catch{n.disabled=!1;f()}
+    });
+  }
+  if(i)j(i.q,"Buy "+i.q+" - Save "+i.p+"%");
+  f();
+}
+
+async function H(){
+  if(!window.location.pathname.includes("/products/"))return;
+  const t=l(".bt-volume-widget");
+  if(t&&t.children.length>0){L(t);return}
+  const e=await Q();
+  if(!e?.length)return;
+  const n=l(".bt-dual-widget-wrap");
+  let r=n?.dataset.productId||window.meta?.product?.id||"",
+      i=n?.dataset.variantId||l('[name="id"]')?.value,
+      f=+n?.dataset.price||4e4;
+  if(!r)return;
+  const s=String(r),
+        u=e.find(o=>o.active&&(o.targetType==="PRODUCT"?String(o.targetGid||"").includes(s):(o.collectionProductIds||[]).map(String).includes(s)));
+  if(!u?.tiers?.length)return;
+  const m=u.tiers.filter(o=>o.minQuantity&&o.discountPercent).sort((o,h)=>o.minQuantity-h.minQuantity);
+  let y="";
+  m.forEach((o,h)=>{
+    const w=o.minQuantity||1,c=o.discountPercent||0,d=f*w,b=Math.round(d*(100-c)/100);
+    y+='<div class="bt-tier-card '+(h?"":"is-selected")+'" data-min-qty="'+w+'" data-discount="'+c+'"><input type="radio" class="bt-tier-radio" '+(h?"":"checked")+'><div class="bt-tier-info"><span class="bt-tier-name">Buy '+w+' \xB7 Save '+c+'%</span><span class="bt-tier-per-item">'+v(Math.round(b/w))+'/ea</span></div><div class="bt-tier-pricing"><span class="bt-tier-price-current">'+v(b)+'</span><span class="bt-tier-price-compare">'+v(d)+'</span></div></div>';
+  });
+  const p=document.createElement("div");
+  p.className="bt-widget-container bt-volume-widget";
+  p.dataset.variantId=String(i||"");
+  p.dataset.productId=s;
+  p.innerHTML='<h3 class="bt-widget-title">Buy More Save More</h3><div class="bt-tiers-list">'+y+'</div><button type="button" class="bt-add-btn">Add To Cart</button><div class="bt-savings-summary"></div>';
+  L(p);
+  if(n)n.appendChild(p);
+  else{
+    const o=l('form[action*="/cart/add"]')||l(".product-form")||l("product-form");
+    if(o){
+      const h=l('button[type="submit"]',o)||l('[name="add"]',o)||l(".product-form__submit",o);
+      h?.parentNode?h.parentNode.insertBefore(p,h):o.appendChild(p);
+    }
+  }
+}
+
+async function T(){
+  M(".bt-volume-widget:not([data-vt-init])").forEach(t=>{t.setAttribute("data-vt-init","1");L(t)});
+  H();R();setInterval(q,500);
+}
+
+document.readyState==="loading"?document.addEventListener("DOMContentLoaded",T):T();
+document.addEventListener("shopify:section:load",T);
+new MutationObserver(()=>q()).observe(document.body,{childList:!0,subtree:!0});
+})();
+`;
+
+const res = esbuild.transformSync(code, { minify: true });
+console.log('Minified size:', res.code.length);
+if (res.code.length <= 10000) {
+  fs.writeFileSync('extensions/bundle-tier-discount-ext/assets/bundle-tier.js', res.code);
+  console.log('SUCCESS! bundle-tier.js updated!');
+} else {
+  console.error('EXCEEDS LIMIT:', res.code.length);
+}
