@@ -1,0 +1,25 @@
+{
+  "name": "bundle-tier-discount-func",
+  "private": true,
+  "version": "1.0.0",
+  "license": "UNLICENSED",
+  "scripts": {
+    "typegen": "shopify app function typegen",
+    "build": "shopify app function build"
+  },
+  "codegen": {
+    "schema": "./schema.graphql",
+    "documents": "./src/**/*.graphql",
+    "generates": {
+      "./src/api.ts": {
+        "plugins": [
+          "typescript",
+          "typescript-operations"
+        ]
+      }
+    }
+  },
+  "dependencies": {
+    "@shopify/shopify_function": "^2.0.1"
+  }
+}

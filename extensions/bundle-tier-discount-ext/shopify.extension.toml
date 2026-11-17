@@ -1,0 +1,7 @@
+api_version = "2026-04"
+
+[[extensions]]
+name = "bundle-tier-discount-ext"
+handle = "bundle-tier-discount-ext"
+uid = "a797bb8e-adce-f125-1663-0dc8bca36741940d0b41"
+type = "theme"

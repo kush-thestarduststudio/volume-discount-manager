@@ -1,0 +1,47 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Development uses SQLite; for production PostgreSQL on VPS, switch provider to "postgresql" and use env("DATABASE_URL")
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model BundleRule {
+  id          String   @id @default(cuid())
+  shop        String
+  title       String
+  targetType  String   @default("PRODUCT") // "PRODUCT" or "COLLECTION"
+  targetGid   String   // GID for product or collection
+  tiers       String   @default("[]")      // JSON array of tiers: [{"minQuantity": 2, "discountPercent": 10, "label": "Buy 2 - Save 10%"}]
+  fbtProducts String   @default("[]")      // JSON array of bundle companion items: [{"productId": "...", "variantId": "...", "title": "...", "price": "...", "image": "...", "discountPercent": 10}]
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([shop, active])
+}

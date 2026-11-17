@@ -1,0 +1,24 @@
+api_version = "2026-04"
+
+[[extensions]]
+name = "bundle-tier-discount-func"
+handle = "bundle-tier-discount-func"
+uid = "1adaf086-d811-a3a8-cb96-c55528d9406fa1937df5"
+type = "function"
+
+  [[extensions.targeting]]
+  target = "cart.lines.discounts.generate.run"
+  input_query = "src/run.graphql"
+  export = "cart-lines-discounts-generate-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"
+
+  [extensions.ui.paths]
+  create = "/"
+  details = "/"
+
+  [extensions.input.variables]
+  namespace = "$app:bundle_tiers"
+  key = "config"
