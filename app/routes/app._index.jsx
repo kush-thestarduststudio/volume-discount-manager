@@ -214,6 +214,7 @@ export const action = async ({ request }) => {
 };
 
 async function syncShopifyDiscountAndMetafields(admin, shop) {
+  let discountStatus = "UNKNOWN";
   try {
     const activeRules = await prisma.bundleRule.findMany({
       where: { shop, active: true },
@@ -380,7 +381,6 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               automaticAppDiscount {
                 discountId
                 title
-                status
               }
               userErrors {
                 field
@@ -438,10 +438,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               (n.apiType && n.apiType.toLowerCase().includes("discount"))
           ) || allFuncs[0];
 
-        const KNOWN_FUNCTION_UID = "1adaf086-d811-a3a8-cb96-c55528d9406fa1937df5";
-        const functionId = funcNode?.id || `gid://shopify/ShopifyFunction/${KNOWN_FUNCTION_UID}`;
+        const REAL_FUNCTION_ID = funcNode?.id || "01a1e800-5a2a-70c1-891a-df5db2048e51";
 
-        console.log("[ShopifyFunction] Registering discount with functionId:", functionId);
+        console.log("[ShopifyFunction] Registering discount with functionId:", REAL_FUNCTION_ID);
 
         let createRes = await admin.graphql(
           `mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
@@ -449,7 +448,6 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               automaticAppDiscount {
                 discountId
                 title
-                status
               }
               userErrors {
                 field
@@ -461,7 +459,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
             variables: {
               automaticAppDiscount: {
                 title: "Bundle & Tier Automatic Discounts",
-                functionId,
+                functionId: REAL_FUNCTION_ID,
                 discountClasses: ["PRODUCT"],
                 startsAt: new Date().toISOString(),
                 combinesWith: {
@@ -484,53 +482,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         let createJson = await createRes.json();
         console.log("[ShopifyFunction] Created discount node response:", JSON.stringify(createJson));
 
-        // If userErrors say functionId is invalid with GID, retry with raw UUID:
         let cErrors = createJson?.data?.discountAutomaticAppCreate?.userErrors;
-        if (cErrors && cErrors.length > 0) {
-          console.warn("[ShopifyFunction] Retrying create with raw UUID functionId...");
-          createRes = await admin.graphql(
-            `mutation CreateAppDiscount($automaticAppDiscount: DiscountAutomaticAppInput!) {
-              discountAutomaticAppCreate(automaticAppDiscount: $automaticAppDiscount) {
-                automaticAppDiscount {
-                  discountId
-                  title
-                  status
-                }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }`,
-            {
-              variables: {
-                automaticAppDiscount: {
-                  title: "Bundle & Tier Automatic Discounts",
-                  functionId: KNOWN_FUNCTION_UID,
-                  discountClasses: ["PRODUCT"],
-                  startsAt: new Date().toISOString(),
-                  combinesWith: {
-                    orderDiscounts: true,
-                    productDiscounts: true,
-                    shippingDiscounts: true,
-                  },
-                  metafields: [
-                    {
-                      namespace: "$app:bundle_tiers",
-                      key: "config",
-                      type: "json",
-                      value: JSON.stringify(configPayload),
-                    },
-                  ],
-                },
-              },
-            }
-          );
-          createJson = await createRes.json();
-          console.log("[ShopifyFunction] Created discount node response (UUID retry):", JSON.stringify(createJson));
-        }
-
-        cErrors = createJson?.data?.discountAutomaticAppCreate?.userErrors;
         if (cErrors && cErrors.length > 0) {
           discountStatus = `CREATE_ERROR: ${cErrors.map((e) => e.message).join(", ")}`;
         } else if (createJson?.data?.discountAutomaticAppCreate?.automaticAppDiscount?.discountId) {

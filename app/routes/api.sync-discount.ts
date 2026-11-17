@@ -165,14 +165,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         (n.discount?.title?.includes("Bundle & Tier") || n.discount?.title?.includes("Volume"))
     );
 
-    let discountMutationResult = null;
-    const KNOWN_FUNCTION_UID = "1adaf086-d811-a3a8-cb96-c55528d9406fa1937df5";
+    let mutationResult = null;
+    const allFuncs = funcData?.data?.shopifyFunctions?.nodes || [];
+    const funcNode = allFuncs.find((n: any) =>
+      n.title?.toLowerCase().includes("bundle") ||
+      n.title?.toLowerCase().includes("tier") ||
+      n.title?.toLowerCase().includes("discount")
+    ) || allFuncs[0];
+
+    const REAL_FUNCTION_ID = funcNode?.id || "01a1e800-5a2a-70c1-891a-df5db2048e51";
 
     if (existingNode) {
-      discountMutationResult = await graphql(
+      mutationResult = await graphql(
         `mutation UpdateDiscount($id: ID!, $input: DiscountAutomaticAppInput!) {
           discountAutomaticAppUpdate(id: $id, automaticAppDiscount: $input) {
-            automaticAppDiscount { discountId title status }
+            automaticAppDiscount { discountId title }
             userErrors { field message }
           }
         }`,
@@ -192,26 +199,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       );
     } else {
-      const allFuncs = funcData?.data?.shopifyFunctions?.nodes || [];
-      const funcNode = allFuncs.find((n: any) =>
-        n.title?.toLowerCase().includes("bundle") ||
-        n.title?.toLowerCase().includes("tier") ||
-        n.title?.toLowerCase().includes("discount")
-      ) || allFuncs[0];
-
-      const functionId = funcNode?.id || `gid://shopify/ShopifyFunction/${KNOWN_FUNCTION_UID}`;
-
-      discountMutationResult = await graphql(
+      mutationResult = await graphql(
         `mutation CreateDiscount($input: DiscountAutomaticAppInput!) {
           discountAutomaticAppCreate(automaticAppDiscount: $input) {
-            automaticAppDiscount { discountId title status }
+            automaticAppDiscount { discountId title }
             userErrors { field message }
           }
         }`,
         {
           input: {
             title: "Bundle & Tier Automatic Discounts",
-            functionId,
+            functionId: REAL_FUNCTION_ID,
             discountClasses: ["PRODUCT"],
             startsAt: new Date().toISOString(),
             combinesWith: {
@@ -230,51 +228,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           },
         }
       );
-
-      const errs = discountMutationResult?.data?.discountAutomaticAppCreate?.userErrors;
-      if (errs && errs.length > 0) {
-        // Retry with raw UUID
-        discountMutationResult = await graphql(
-          `mutation CreateDiscount($input: DiscountAutomaticAppInput!) {
-            discountAutomaticAppCreate(automaticAppDiscount: $input) {
-              automaticAppDiscount { discountId title status }
-              userErrors { field message }
-            }
-          }`,
-          {
-            input: {
-              title: "Bundle & Tier Automatic Discounts",
-              functionId: KNOWN_FUNCTION_UID,
-              discountClasses: ["PRODUCT"],
-              startsAt: new Date().toISOString(),
-              combinesWith: {
-                orderDiscounts: true,
-                productDiscounts: true,
-                shippingDiscounts: true,
-              },
-              metafields: [
-                {
-                  namespace: "$app:bundle_tiers",
-                  key: "config",
-                  type: "json",
-                  value: JSON.stringify(configPayload),
-                },
-              ],
-            },
-          }
-        );
-      }
     }
 
     return new Response(
       JSON.stringify({
         ok: true,
         shop,
-        rulesCount: activeRulesPayload.length,
-        funcData,
-        discountData,
+        realFunctionId: REAL_FUNCTION_ID,
+        existingNodeId: existingNode?.id || null,
+        mutationResult,
         metafieldSetResult,
-        discountMutationResult,
       }, null, 2),
       { headers }
     );
