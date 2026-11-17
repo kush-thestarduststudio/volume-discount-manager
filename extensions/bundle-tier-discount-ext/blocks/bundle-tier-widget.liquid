@@ -113,6 +113,7 @@
               class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
               data-min-qty="{{ min_qty }}"
               data-discount="{{ disc_pct }}"
+              data-code="{{ tier.code | default: '' }}"
               data-label="{{ tier.label | default: '' }}"
             >
               {% if forloop.index == 2 and forloop.length > 2 %}
@@ -166,6 +167,7 @@
                 class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
                 data-min-qty="{{ min_qty }}"
                 data-discount="{{ disc_pct }}"
+                data-code="{{ tier.code | default: '' }}"
                 data-label="{{ tier.label | default: '' }}"
               >
                 <span class="bt-tier-badge">Best Value</span>
