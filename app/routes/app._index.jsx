@@ -98,9 +98,19 @@ export const action = async ({ request }) => {
         return { ok: false, error: "Please add at least 1 discount tier (click '+ Add Tier')." };
       }
 
+      let existing = null;
       if (id) {
+        existing = await prisma.bundleRule.findUnique({ where: { id } });
+      }
+      if (!existing && targetGid) {
+        existing = await prisma.bundleRule.findFirst({
+          where: { shop: session.shop, targetGid },
+        });
+      }
+
+      if (existing) {
         await prisma.bundleRule.update({
-          where: { id },
+          where: { id: existing.id },
           data: {
             title,
             targetType,
@@ -145,9 +155,19 @@ export const action = async ({ request }) => {
         companions: parsedFbt,
       });
 
+      let existing = null;
       if (id) {
+        existing = await prisma.bundleRule.findUnique({ where: { id } });
+      }
+      if (!existing && targetGid) {
+        existing = await prisma.bundleRule.findFirst({
+          where: { shop: session.shop, targetGid, tiers: "[]" },
+        });
+      }
+
+      if (existing) {
         await prisma.bundleRule.update({
-          where: { id },
+          where: { id: existing.id },
           data: {
             title,
             targetType: "PRODUCT",
@@ -173,15 +193,26 @@ export const action = async ({ request }) => {
     } else if (intent === "toggle_status") {
       const id = formData.get("id");
       const current = formData.get("currentActive") === "true";
-      await prisma.bundleRule.update({
-        where: { id },
-        data: { active: !current },
-      });
+      let existing = id ? await prisma.bundleRule.findUnique({ where: { id } }) : null;
+      if (!existing) {
+        existing = await prisma.bundleRule.findFirst({
+          where: { shop: session.shop },
+        });
+      }
+      if (existing) {
+        await prisma.bundleRule.update({
+          where: { id: existing.id },
+          data: { active: !current },
+        });
+      }
     } else if (intent === "delete_rule") {
       const id = formData.get("id");
-      await prisma.bundleRule.delete({
-        where: { id },
-      });
+      let existing = id ? await prisma.bundleRule.findUnique({ where: { id } }) : null;
+      if (existing) {
+        await prisma.bundleRule.delete({
+          where: { id: existing.id },
+        });
+      }
     }
 
     // Sync all active rules to Shopify Shop Metafield & Automatic Discount
