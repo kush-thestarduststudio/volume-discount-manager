@@ -14,15 +14,6 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
-  function getRoots() {
-    const r = [document];
-    try {
-      $$("*").forEach((el) => el.shadowRoot && !r.includes(el.shadowRoot) && r.push(el.shadowRoot));
-      $$("iframe").forEach((f) => { try { f.contentDocument && !r.includes(f.contentDocument) && r.push(f.contentDocument); } catch {} });
-    } catch {}
-    return r;
-  }
-
   function triggerRefresh() {
     ["cart:refresh", "cart:updated"].forEach((n) => {
       const e = new CustomEvent(n, { bubbles: true });
@@ -43,11 +34,24 @@
     inp && (inp.value = String(qty), inp.dispatchEvent(new Event("change", { bubbles: true })));
   }
 
+  // 1. APPLY DISCOUNT DIRECTLY TO SHOPIFY CART (EXACTLY LIKE SELLEASY)
   let lastAppliedCode = null;
-  function preapply(code) {
-    if (code === lastAppliedCode) return;
+  let isApplyingDiscount = false;
+
+  async function applyCartDiscount(code) {
+    if (code === lastAppliedCode || isApplyingDiscount) return;
+    isApplyingDiscount = true;
     lastAppliedCode = code;
+
     try {
+      // Send discount directly to Shopify Cart via Ajax Cart API
+      await fetch(ROOT + "cart/update.js", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ discount: code || "" }),
+      });
+
+      // Also set checkout discount session and cookies for Fastrr / Shiprocket 1-click checkout
       if (code) {
         fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
         document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
@@ -65,11 +69,19 @@
         document.cookie = "fastrrCouponCode=; path=/; max-age=0";
         try { localStorage.removeItem("fastrrCouponCode"); } catch {}
         try { sessionStorage.removeItem("fastrrCouponCode"); } catch {}
+        try { localStorage.removeItem("discount_code"); } catch {}
       }
-    } catch {}
+
+      // Notify cart listeners so Shiprocket Cart Drawer refreshes with native discounted totals
+      triggerRefresh();
+    } catch (e) {
+      console.error("[BundleTier] Error updating cart discount:", e);
+    } finally {
+      isApplyingDiscount = false;
+    }
   }
 
-  // 1. VOLUME WIDGET
+  // 2. VOLUME WIDGET INITIALIZATION
   function initVolume(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -106,7 +118,6 @@
           val: parseFloat(card.dataset.discountValue || card.dataset.discount || "0") || 0,
           code: card.dataset.code || "",
         };
-        if (sel.code) preapply(sel.code);
         render();
       });
     });
@@ -123,16 +134,19 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
-          if (sel?.code) preapply(sel.code);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ items: [{ id, quantity: qty }] }),
           });
           if (!res.ok) throw new Error();
+
+          // Apply discount directly in cart (like Selleasy)
+          if (sel?.code) {
+            await applyCartDiscount(sel.code);
+          }
           btn.textContent = "✓ Added!";
           triggerRefresh();
-          setTimeout(syncDrawerPrice, 400);
           setTimeout(() => { btn.disabled = false; render(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -141,11 +155,10 @@
       });
     }
 
-    if (sel?.code) preapply(sel.code);
     render();
   }
 
-  // 2. FBT WIDGET
+  // 3. FBT WIDGET INITIALIZATION
   function initFbt(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -215,17 +228,19 @@
         btn.disabled = true;
         btn.textContent = "Adding Bundle...";
         try {
-          const bundleCode = wrap.dataset.code;
-          if (bundleCode && items.length > 1) preapply(bundleCode);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ items }),
           });
           if (!res.ok) throw new Error();
+
+          const bundleCode = wrap.dataset.code;
+          if (bundleCode && items.length > 1) {
+            await applyCartDiscount(bundleCode);
+          }
           btn.textContent = "✓ Added Bundle!";
           triggerRefresh();
-          setTimeout(syncDrawerPrice, 400);
           setTimeout(() => { btn.disabled = false; calc(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -237,7 +252,7 @@
     calc();
   }
 
-  // 3. FETCH CONFIG & RULES
+  // 4. FETCH CONFIG & RULES
   let configCache = null;
   async function getConfig() {
     if (configCache) return configCache;
@@ -257,7 +272,7 @@
     return Array.isArray(cfg?.rules) ? cfg.rules : [];
   }
 
-  // 4. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
+  // 5. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
   const cleanCode = (t) =>
     (t || "")
       .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
@@ -323,116 +338,42 @@
 
     if (!candidates.length) return { disc: 0, code: null };
 
-    // Max Savings Resolution: Whichever discount yields the HIGHER discount is awarded!
+    // Max Savings Rule: Highest discount wins!
     candidates.sort((a, b) => b.disc - a.disc);
     return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
-  // 5. UPDATE ESTIMATED TOTAL WITH STRIKETHROUGH IN DRAWER
-  function applyTotal(str, origStr) {
-    if (!str) return;
-    getRoots().forEach((root) => {
-      Array.from(root.querySelectorAll("*"))
-        .filter((el) => el.children.length <= 2 && /estimated total/i.test(el.textContent || ""))
-        .forEach((lbl) => {
-          let cur = lbl.parentElement;
-          for (let i = 0; i < 4 && cur && cur !== root; i++, cur = cur.parentElement) {
-            const pEls = Array.from(cur.querySelectorAll("*")).filter((el) =>
-              !el.children.length &&
-              !el.closest("button") &&
-              !el.closest("[class*='item'], [class*='product']") &&
-              /^₹\s*[\d,]+(\.\d+)?$/.test((el.textContent || "").trim())
-            );
-
-            if (pEls.length) {
-              if (origStr && origStr !== str) {
-                if (pEls.length >= 2) {
-                  pEls[0].textContent = origStr;
-                  pEls[0].style.cssText = "text-decoration:line-through;color:#888;margin-right:6px;";
-                  pEls[pEls.length - 1].textContent = str;
-                  pEls[pEls.length - 1].style.display = "";
-                } else {
-                  pEls[0].innerHTML = `<s style="color:#888;font-weight:400;margin-right:6px;">${origStr}</s><span>${str}</span>`;
-                }
-              } else {
-                pEls[pEls.length - 1].textContent = str;
-              }
-              break;
-            }
-          }
-        });
-    });
-  }
-
-  let activePriceStr = null, activeOrigStr = null, timer = null;
-
-  function setDrawerPrice(pStr, origStr) {
-    activePriceStr = pStr;
-    activeOrigStr = origStr;
-    if (!pStr) return;
-    applyTotal(pStr, origStr);
-    if (timer) clearInterval(timer);
-    let ticks = 0;
-    timer = setInterval(() => {
-      if (activePriceStr) applyTotal(activePriceStr, activeOrigStr);
-      ticks++;
-      if (ticks > 25) clearInterval(timer);
-    }, 200);
-  }
-
-  async function syncDrawerPrice() {
+  // 6. SYNC CART DISCOUNT (EVALUATES CART AND APPLIES/CLEARS DISCOUNT DIRECTLY IN SHOPIFY CART)
+  let syncLock = false;
+  async function syncCartDiscount() {
+    if (syncLock) return;
+    syncLock = true;
     try {
       const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
       if (!res.ok) return;
       const cart = await res.json();
+
       if (!cart?.items?.length) {
-        activePriceStr = null;
-        activeOrigStr = null;
-        lastAppliedCode = null;
+        if (lastAppliedCode) await applyCartDiscount("");
         return;
       }
 
-      let origTotal = cart.original_total_price || cart.total_price;
-      let finalTotal = cart.total_price;
-      let lineFinal = 0, lineOrig = 0;
-
-      cart.items.forEach((item) => {
-        const o = item.original_line_price ?? (item.original_price * item.quantity);
-        const f = item.final_line_price ?? (item.final_price ? item.final_price * item.quantity : o);
-        lineOrig += o;
-        lineFinal += f;
-      });
-
-      if (lineOrig > origTotal) origTotal = lineOrig;
-      if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
-
       const rules = await getRules();
       const { disc, code } = getActiveDiscount(cart, rules);
-      if (disc > 0) {
-        const ruleFinal = Math.max(0, origTotal - disc);
-        if (ruleFinal < finalTotal) finalTotal = ruleFinal;
-      }
 
-      if (code) {
-        window.__btActiveCode = code;
-        preapply(code);
-      } else {
-        window.__btActiveCode = null;
-        preapply(null);
+      if (code && disc > 0) {
+        if (code !== lastAppliedCode) {
+          await applyCartDiscount(code);
+        }
+      } else if (lastAppliedCode) {
+        await applyCartDiscount("");
       }
-
-      if (finalTotal < origTotal) {
-        setDrawerPrice(fmtPrice(finalTotal), fmtPrice(origTotal));
-      } else {
-        activePriceStr = null;
-        activeOrigStr = null;
-        if (timer) clearInterval(timer);
-        applyTotal(fmtPrice(origTotal), null);
-      }
-    } catch {}
+    } catch {} finally {
+      syncLock = false;
+    }
   }
 
-  // 6. PDP HYDRATION & DYNAMIC INJECTION
+  // 7. PDP HYDRATION & DYNAMIC INJECTION
   let pdpInjected = false;
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
@@ -658,47 +599,47 @@
     } catch {}
   }
 
-  // 7. OBSERVER & INTERCEPTOR
-  let obsTimer = null;
-  const observer = new MutationObserver(() => {
-    if (!activePriceStr || obsTimer) return;
-    obsTimer = setTimeout(() => {
-      obsTimer = null;
-      if (activePriceStr) applyTotal(activePriceStr, activeOrigStr);
-    }, 120);
-  });
-
+  // 8. INTERCEPT CART FETCHES TO KEEP CART DISCOUNT ALWAYS IN SYNC
   const _fetch = window.fetch;
   window.fetch = function(...args) {
     const res = _fetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-      if (/\/cart\/(add|change|update|clear)/.test(url) && !url.includes("_bt=")) {
-        res.then(() => setTimeout(syncDrawerPrice, 350)).catch(() => {});
+      if (/\/cart\/(add|change|update|clear)/.test(url) && !url.includes("_bt=") && !url.includes("update.js")) {
+        res.then(() => setTimeout(syncCartDiscount, 300)).catch(() => {});
       }
     } catch {}
     return res;
   };
 
+  // 9. ON CHECKOUT CLICK, ENSURE FASTTR/CHECKOUT HAS DISCOUNT PRE-APPLIED
   document.addEventListener("click", (e) => {
     const btn = e.target.closest("button, a, [role='button']");
     if (!btn) return;
     const txt = (btn.textContent || "").trim().toLowerCase();
     if (txt.includes("buy now") || txt.includes("checkout")) {
-      if (window.__btActiveCode) preapply(window.__btActiveCode);
+      if (lastAppliedCode) {
+        fetch(ROOT + "discount/" + encodeURIComponent(lastAppliedCode)).catch(() => {});
+        document.cookie = "discount_code=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
+        document.cookie = "fastrrCouponCode=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
+        try {
+          window.Fastrr?.applyCoupon?.(lastAppliedCode);
+          window.Fastrr?.cart?.applyCoupon?.(lastAppliedCode);
+          window.Shiprocket?.applyCoupon?.(lastAppliedCode);
+        } catch {}
+      }
     } else if (txt === "+" || txt === "-" || btn.className?.includes?.("qty") || btn.className?.includes?.("quantity")) {
-      setTimeout(syncDrawerPrice, 400);
+      setTimeout(syncCartDiscount, 400);
     }
   }, true);
 
   function start() {
     hydratePdp();
-    setTimeout(syncDrawerPrice, 600);
-    try { observer.observe(document.body, { childList: true, subtree: true }); } catch {}
+    setTimeout(syncCartDiscount, 500);
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
   document.addEventListener("shopify:section:load", start);
-  window.addEventListener("cart:refresh", () => setTimeout(syncDrawerPrice, 200));
-  window.addEventListener("cart:updated", () => setTimeout(syncDrawerPrice, 200));
+  window.addEventListener("cart:refresh", () => setTimeout(syncCartDiscount, 200));
+  window.addEventListener("cart:updated", () => setTimeout(syncCartDiscount, 200));
 })();
