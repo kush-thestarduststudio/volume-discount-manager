@@ -3,7 +3,7 @@
   if (window.__btEngineLoaded) return;
   window.__btEngineLoaded = true;
 
-  const API_URL = "https://volume-discount-manager.onrender.com/api/config";
+  const API_URL = "//volume-discount-manager.onrender.com/api/config";
   const ROOT = window.Shopify?.routes?.root || "/";
 
   const fmt = (c) => "₹" + ((Number(c) || 0) / 100).toFixed(2);
@@ -17,38 +17,25 @@
   function getRoots() {
     const r = [document];
     try {
-      $$("*").forEach((el) => { if (el.shadowRoot && !r.includes(el.shadowRoot)) r.push(el.shadowRoot); });
-      $$("iframe").forEach((f) => {
-        try { if (f.contentDocument && !r.includes(f.contentDocument)) r.push(f.contentDocument); } catch {}
-      });
+      $$("*").forEach((el) => el.shadowRoot && !r.includes(el.shadowRoot) && r.push(el.shadowRoot));
+      $$("iframe").forEach((f) => { try { f.contentDocument && !r.includes(f.contentDocument) && r.push(f.contentDocument); } catch {} });
     } catch {}
     return r;
   }
 
   function triggerRefresh() {
-    ["cart:refresh", "cart:updated", "cart:build"].forEach((n) => {
+    ["cart:refresh", "cart:updated"].forEach((n) => {
       const e = new CustomEvent(n, { bubbles: true });
       window.dispatchEvent(e);
       document.dispatchEvent(e);
     });
     try {
       window.Shiprocket?.refreshCart?.();
-      window.Fastrr?.cart?.refresh?.();
       window.Fastrr?.refresh?.();
-      window.shiprocketCheckout?.refresh?.();
-      window.shiprocketSmartCart?.refreshCart?.();
+      window.Fastrr?.cart?.refresh?.();
     } catch {}
-
-    const drawer = $("cart-drawer");
-    if (drawer?.renderContents) {
-      fetch(ROOT + "?sections=cart-drawer,cart-icon-bubble")
-        .then((r) => r.json())
-        .then((s) => {
-          drawer.renderContents({ sections: s });
-          drawer.open?.();
-        })
-        .catch(() => {});
-    }
+    const d = $("cart-drawer");
+    d?.renderContents && fetch(ROOT + "?sections=cart-drawer,cart-icon-bubble").then((r) => r.json()).then((s) => { d.renderContents({ sections: s }); d.open?.(); }).catch(() => {});
   }
 
   function syncQty(qty) {
@@ -61,7 +48,15 @@
 
   function preapply(code) {
     if (!code) return;
-    try { fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {}); } catch {}
+    try {
+      fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
+      document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
+      fetch(ROOT + "cart/update.js", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ attributes: { discount: code, discount_code: code, _discount_code: code } }),
+      }).catch(() => {});
+    } catch {}
   }
 
   // 1. VOLUME WIDGET
@@ -82,8 +77,8 @@
     function render() {
       if (!sel) return;
       syncQty(sel.qty);
-      if (btn) btn.textContent = `Add ${sel.qty} to Cart` + (sel.disc ? ` (${sel.disc}% OFF)` : "");
-      if (summary) summary.textContent = sel.disc ? `Save ${sel.disc}% with this bundle!` : "";
+      btn && (btn.textContent = `Add ${sel.qty} to Cart` + (sel.disc ? ` (${sel.disc}% OFF)` : ""));
+      summary && (summary.textContent = sel.disc ? `Save ${sel.disc}% with this bundle!` : "");
     }
 
     cards.forEach((card) => {
@@ -97,6 +92,7 @@
           disc: parseInt(card.dataset.discount, 10) || 0,
           code: card.dataset.code || "",
         };
+        if (sel.code) preapply(sel.code);
         render();
       });
     });
@@ -131,6 +127,7 @@
       });
     }
 
+    if (sel?.code) preapply(sel.code);
     render();
   }
 
@@ -169,10 +166,10 @@
       });
 
       const save = orig - total;
-      if (priceEl) priceEl.textContent = fmt(total);
-      if (compareEl) compareEl.textContent = save > 0 ? fmt(orig) : "";
-      if (noteEl) noteEl.textContent = save > 0 ? `Save ${fmt(save)} with this bundle!` : "";
-      if (btn) btn.textContent = `Add ${count} Items To Cart`;
+      priceEl && (priceEl.textContent = fmt(total));
+      compareEl && (compareEl.textContent = save > 0 ? fmt(orig) : "");
+      noteEl && (noteEl.textContent = save > 0 ? `Save ${fmt(save)} with this bundle!` : "");
+      btn && (btn.textContent = `Add ${count} Items To Cart`);
     }
 
     cbs.forEach((cb) => cb.addEventListener("change", calc));
@@ -228,10 +225,13 @@
     return [];
   }
 
-  // 4. CALCULATE DISCOUNT FROM RULES
-  function calcRuleDiscount(cart, rules) {
-    if (!cart?.items?.length || !rules?.length) return 0;
-    let disc = 0;
+  // 4. FIND APPLICABLE DISCOUNT & CODE
+  const cleanCode = (t) => t.replace(/^(volume tier:\s*|collection tier:\s*|bundle for:\s*)/i, "").replace(/\W/g, "").toUpperCase().slice(0, 8) || "OFFER";
+
+  function getActiveDiscount(cart, rules) {
+    if (!cart?.items?.length || !rules?.length) return { disc: 0, code: null };
+    let disc = 0, code = null;
+
     for (const r of rules) {
       if (!r.active) continue;
       const tId = String(r.targetGid || "").replace(/\D/g, "");
@@ -242,26 +242,28 @@
         if (t) {
           const sub = items.reduce((s, it) => s + (it.original_line_price || it.price * it.quantity), 0);
           disc += Math.round(sub * (t.discountPercent / 100));
+          if (!code) code = t.code || `${cleanCode(r.title)}-BUY${t.minQuantity}-${t.discountPercent}OFF`;
         }
       } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
         const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
         if (cart.items.some((it) => String(it.product_id) === tId) && cIds.some((id) => cart.items.some((it) => String(it.product_id) === id))) {
-          const bPct = Number(r.mainDiscountPercent || 0);
+          const bp = Number(r.mainDiscountPercent || 0);
           cart.items.forEach((it) => {
             const pid = String(it.product_id);
             const orig = it.original_line_price || it.price * it.quantity;
-            if (pid === tId && bPct > 0) disc += Math.round(orig * (bPct / 100));
+            if (pid === tId && bp > 0) disc += Math.round(orig * (bp / 100));
             const comp = r.fbtProducts.find((cp) => String(cp.productId).replace(/\D/g, "") === pid);
-            if (comp) disc += Math.round(orig * (Number(comp.discountPercent || bPct || 10) / 100));
+            if (comp) disc += Math.round(orig * (Number(comp.discountPercent || bp || 10) / 100));
           });
+          if (!code) code = r.discountCode || `BUNDLE-${cleanCode(r.title)}-${bp || Number(r.fbtProducts[0]?.discountPercent || 10)}OFF`;
         }
       }
     }
-    return disc;
+    return { disc, code };
   }
 
-  // 5. UPDATE ESTIMATED TOTAL PRICE IN DRAWER ONLY
-  function applyTotal(str) {
+  // 5. UPDATE ESTIMATED TOTAL WITH STRIKETHROUGH IN DRAWER
+  function applyTotal(str, origStr) {
     if (!str) return;
     getRoots().forEach((root) => {
       Array.from(root.querySelectorAll("*"))
@@ -270,16 +272,25 @@
           let cur = lbl.parentElement;
           for (let i = 0; i < 4 && cur && cur !== root; i++, cur = cur.parentElement) {
             const pEls = Array.from(cur.querySelectorAll("*")).filter((el) =>
-              el.children.length === 0 &&
+              !el.children.length &&
               !el.closest("button") &&
               !el.closest("[class*='item'], [class*='product']") &&
               /^₹\s*[\d,]+(\.\d+)?$/.test((el.textContent || "").trim())
             );
 
-            if (pEls.length > 0) {
-              const targetEl = pEls[pEls.length - 1];
-              if (targetEl.textContent.trim() !== str) targetEl.textContent = str;
-              for (let j = 0; j < pEls.length - 1; j++) pEls[j].style.display = "none";
+            if (pEls.length) {
+              if (origStr && origStr !== str) {
+                if (pEls.length >= 2) {
+                  pEls[0].textContent = origStr;
+                  pEls[0].style.cssText = "text-decoration:line-through;color:#888;margin-right:6px;";
+                  pEls[pEls.length - 1].textContent = str;
+                  pEls[pEls.length - 1].style.display = "";
+                } else {
+                  pEls[0].innerHTML = `<s style="color:#888;font-weight:400;margin-right:6px;">${origStr}</s><span>${str}</span>`;
+                }
+              } else {
+                pEls[pEls.length - 1].textContent = str;
+              }
               break;
             }
           }
@@ -288,16 +299,18 @@
   }
 
   let activePriceStr = null;
+  let activeOrigStr = null;
   let timer = null;
 
-  function setDrawerPrice(pStr) {
+  function setDrawerPrice(pStr, origStr) {
     activePriceStr = pStr;
+    activeOrigStr = origStr;
     if (!pStr) return;
-    applyTotal(pStr);
+    applyTotal(pStr, origStr);
     if (timer) clearInterval(timer);
     let ticks = 0;
     timer = setInterval(() => {
-      if (activePriceStr) applyTotal(activePriceStr);
+      if (activePriceStr) applyTotal(activePriceStr, activeOrigStr);
       ticks++;
       if (ticks > 25) clearInterval(timer);
     }, 200);
@@ -310,6 +323,7 @@
       const cart = await res.json();
       if (!cart?.items?.length) {
         activePriceStr = null;
+        activeOrigStr = null;
         return;
       }
 
@@ -328,16 +342,24 @@
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
       const rules = await getRules();
-      const ruleDisc = calcRuleDiscount(cart, rules);
-      if (ruleDisc > 0) {
-        const ruleFinal = Math.max(0, origTotal - ruleDisc);
+      const { disc, code } = getActiveDiscount(cart, rules);
+      if (disc > 0) {
+        const ruleFinal = Math.max(0, origTotal - disc);
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
       }
 
+      if (code) {
+        window.__btActiveCode = code;
+        preapply(code);
+      } else {
+        window.__btActiveCode = null;
+      }
+
       if (finalTotal < origTotal) {
-        setDrawerPrice(fmtPrice(finalTotal));
+        setDrawerPrice(fmtPrice(finalTotal), fmtPrice(origTotal));
       } else {
         activePriceStr = null;
+        activeOrigStr = null;
       }
     } catch {}
   }
@@ -349,9 +371,7 @@
     $$(".bt-volume-widget").forEach(initVolume);
     $$(".bt-fbt-widget").forEach(initFbt);
 
-    const ssrVol = $(".bt-volume-widget");
-    const ssrFbt = $(".bt-fbt-widget");
-    if (ssrVol && ssrFbt) return;
+    if ($(".bt-volume-widget") && $(".bt-fbt-widget")) return;
 
     const rules = await getRules();
     if (!rules.length) return;
@@ -361,15 +381,13 @@
     if (!pId) return;
     const pIdStr = String(pId);
 
-    if (!ssrVol) {
+    if (!$(".bt-volume-widget")) {
       const r = rules.find((x) => x.active && x.ruleType === "VOLUME" && x.tiers?.length && (x.targetType === "PRODUCT" ? String(x.targetGid || "").includes(pIdStr) : (x.collectionProductIds || []).map(String).includes(pIdStr)));
       if (r?.tiers?.length) {
         const el = document.createElement("div");
         el.className = "bt-widget-container bt-volume-widget";
         el.dataset.variantId = $('[name="id"]')?.value || "";
-        el.innerHTML = '<h3 class="bt-widget-title">Buy More, Save More</h3><div class="bt-tiers-list">' +
-          r.tiers.map((t, i) => `<div class="bt-tier-card ${i === 0 ? "is-selected" : ""}" data-min-qty="${t.minQuantity}" data-discount="${t.discountPercent}" data-code="${t.code || ""}"><input type="radio" class="bt-tier-radio" ${i === 0 ? "checked" : ""}><div class="bt-tier-info"><span class="bt-tier-name">Buy ${t.minQuantity} · Save ${t.discountPercent}%</span></div></div>`).join("") +
-          '</div><button type="button" class="bt-add-btn">Add To Cart</button><div class="bt-savings-summary"></div>';
+        el.innerHTML = `<h3 class="bt-widget-title">Buy More, Save More</h3><div class="bt-tiers-list">${r.tiers.map((t, i) => `<div class="bt-tier-card${i ? "" : " is-selected"}" data-min-qty="${t.minQuantity}" data-discount="${t.discountPercent}" data-code="${t.code || ""}"><input type="radio" class="bt-tier-radio"${i ? "" : " checked"}><div class="bt-tier-info"><span>Buy ${t.minQuantity} · Save ${t.discountPercent}%</span></div></div>`).join("")}</div><button type="button" class="bt-add-btn">Add To Cart</button>`;
         initVolume(el);
         (wrap || $('form[action*="/cart/add"]') || $(".product-form"))?.appendChild(el);
       }
@@ -382,7 +400,7 @@
     if (!activePriceStr || obsTimer) return;
     obsTimer = setTimeout(() => {
       obsTimer = null;
-      if (activePriceStr) applyTotal(activePriceStr);
+      if (activePriceStr) applyTotal(activePriceStr, activeOrigStr);
     }, 120);
   });
 
@@ -397,6 +415,15 @@
     } catch {}
     return res;
   };
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("button, a, [role='button']");
+    if (!btn) return;
+    const txt = (btn.textContent || "").trim().toLowerCase();
+    if (txt.includes("buy now") || txt.includes("checkout")) {
+      if (window.__btActiveCode) preapply(window.__btActiveCode);
+    }
+  }, true);
 
   function start() {
     hydratePdp();
