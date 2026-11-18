@@ -40,22 +40,16 @@
 
   function syncQty(qty) {
     const inp = ($('form[action*="/cart/add"]') || $(".product-form") || $("product-form"))?.querySelector('input[name="quantity"]');
-    if (inp) {
-      inp.value = String(qty);
-      inp.dispatchEvent(new Event("change", { bubbles: true }));
-    }
+    inp && (inp.value = String(qty), inp.dispatchEvent(new Event("change", { bubbles: true })));
   }
 
+  let lastAppliedCode = null;
   function preapply(code) {
-    if (!code) return;
+    if (!code || code === lastAppliedCode) return;
+    lastAppliedCode = code;
     try {
       fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
       document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
-      fetch(ROOT + "cart/update.js", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ attributes: { discount: code, discount_code: code, _discount_code: code } }),
-      }).catch(() => {});
     } catch {}
   }
 
@@ -324,6 +318,7 @@
       if (!cart?.items?.length) {
         activePriceStr = null;
         activeOrigStr = null;
+        lastAppliedCode = null;
         return;
       }
 
@@ -360,6 +355,8 @@
       } else {
         activePriceStr = null;
         activeOrigStr = null;
+        if (timer) clearInterval(timer);
+        applyTotal(fmtPrice(origTotal), null);
       }
     } catch {}
   }
@@ -409,8 +406,8 @@
     const res = _fetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-      if (/\/cart\/(add|change|update|clear)/.test(url)) {
-        res.then(() => setTimeout(syncDrawerPrice, 300)).catch(() => {});
+      if (/\/cart\/(add|change|update|clear)/.test(url) && !url.includes("_bt=")) {
+        res.then(() => setTimeout(syncDrawerPrice, 350)).catch(() => {});
       }
     } catch {}
     return res;
@@ -422,6 +419,8 @@
     const txt = (btn.textContent || "").trim().toLowerCase();
     if (txt.includes("buy now") || txt.includes("checkout")) {
       if (window.__btActiveCode) preapply(window.__btActiveCode);
+    } else if (txt === "+" || txt === "-" || btn.className?.includes?.("qty") || btn.className?.includes?.("quantity")) {
+      setTimeout(syncDrawerPrice, 400);
     }
   }, true);
 
