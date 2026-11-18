@@ -75,6 +75,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         tiers = [];
       }
 
+      let fbtDiscountType = "PERCENTAGE";
+      let fbtDiscountValue = 0;
+      let triggerProduct = null;
+
       try {
         const rawFbt = JSON.parse(r.fbtProducts || "[]");
         if (Array.isArray(rawFbt)) {
@@ -82,6 +86,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         } else if (rawFbt && rawFbt.companions) {
           fbtProducts = rawFbt.companions;
           mainDiscountPercent = Number(rawFbt.mainDiscountPercent || 0);
+          fbtDiscountType = rawFbt.discountType || "PERCENTAGE";
+          fbtDiscountValue = Number(rawFbt.discountValue ?? (rawFbt.mainDiscountPercent || 0));
+          triggerProduct = rawFbt.triggerProduct || null;
         }
       } catch (e) {
         fbtProducts = [];
@@ -95,13 +102,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         .toUpperCase()
         .slice(0, 8) || (isFbt ? "BUNDLE" : "OFFER");
 
-      const bundleDiscountPct = mainDiscountPercent > 0 ? mainDiscountPercent : (fbtProducts[0]?.discountPercent || 10);
-      const discountCode = isFbt ? `BUNDLE-${cleanName}-${bundleDiscountPct}OFF` : "";
+      const isFixedFbt = fbtDiscountType === "FIXED_AMOUNT";
+      const bundleVal = Number(isFixedFbt ? fbtDiscountValue : (fbtDiscountValue || mainDiscountPercent || fbtProducts[0]?.discountPercent || 10));
+      const discountCode = isFbt ? `BUNDLE-${cleanName}-${bundleVal}OFF` : "";
 
-      const enhancedTiers = tiers.map((t: any) => ({
-        ...t,
-        code: `${cleanName}-BUY${t.minQuantity}-${t.discountPercent}OFF`,
-      }));
+      const enhancedTiers = tiers.map((t: any) => {
+        const isFixed = t.discountType === "FIXED_AMOUNT";
+        const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 10));
+        return {
+          ...t,
+          discountType: isFixed ? "FIXED_AMOUNT" : "PERCENTAGE",
+          discountValue: val,
+          discountPercent: isFixed ? 0 : val,
+          code: `${cleanName}-BUY${t.minQuantity}-${val}OFF`,
+        };
+      });
 
       return {
         id: r.id,
@@ -109,7 +124,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         targetType: r.targetType,
         targetGid: r.targetGid,
         ruleType: isFbt ? "FBT" : "VOLUME",
+        discountType: isFbt ? fbtDiscountType : (enhancedTiers[0]?.discountType || "PERCENTAGE"),
+        discountValue: isFbt ? bundleVal : (enhancedTiers[0]?.discountValue || 0),
         mainDiscountPercent,
+        triggerProduct,
         discountCode,
         tiers: enhancedTiers,
         fbtProducts,

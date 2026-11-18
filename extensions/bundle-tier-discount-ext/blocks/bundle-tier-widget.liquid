@@ -40,6 +40,16 @@
           {% endif %}
         {% endfor %}
       {% endif %}
+
+      {% if matched_fbt_rule == nil and rule.fbtProducts and rule.fbtProducts.size > 0 %}
+        {% for comp in rule.fbtProducts %}
+          {% assign comp_id_str = comp.productId | append: '' %}
+          {% if comp_id_str contains current_product_id_str %}
+            {% assign matched_fbt_rule = rule %}
+            {% break %}
+          {% endif %}
+        {% endfor %}
+      {% endif %}
     {% endif %}
   {% endfor %}
 {% endif %}
@@ -100,10 +110,22 @@
         {% if matched_product_volume_rule != nil %}
           {% for tier in matched_product_volume_rule.tiers %}
             {% assign min_qty = tier.minQuantity | default: 1 %}
-            {% assign disc_pct = tier.discountPercent | default: 0 %}
-            {% assign original_total = base_price | times: min_qty %}
-            {% assign discount_multiplier = 100 | minus: disc_pct %}
-            {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+            {% assign is_fixed_tier = false %}
+            {% if tier.discountType == 'FIXED_AMOUNT' %}
+              {% assign is_fixed_tier = true %}
+              {% assign tier_val = tier.discountValue | default: 100 %}
+              {% assign fixed_amt = tier_val | times: 100 %}
+              {% assign original_total = base_price | times: min_qty %}
+              {% assign discounted_total = original_total | minus: fixed_amt %}
+              {% if discounted_total < 0 %}{% assign discounted_total = 0 %}{% endif %}
+              {% assign disc_pct = 0 %}
+            {% else %}
+              {% assign tier_val = tier.discountPercent | default: tier.discountValue | default: 10 %}
+              {% assign disc_pct = tier_val %}
+              {% assign original_total = base_price | times: min_qty %}
+              {% assign discount_multiplier = 100 | minus: disc_pct %}
+              {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+            {% endif %}
             {% assign per_item = discounted_total | divided_by: min_qty %}
             {% assign card_counter = card_counter | plus: 1 %}
             {% assign qty_key = ',' | append: min_qty | append: ',' %}
@@ -111,11 +133,13 @@
 
             {% assign clean_title = product.title | remove: 'Volume Tier:' | remove: 'Bundle for:' | strip %}
             {% assign clean_slug = clean_title | slice: 0, 8 | upcase %}
-            {% assign tier_code = clean_slug | append: '-BUY' | append: min_qty | append: '-' | append: disc_pct | append: 'OFF' %}
+            {% assign tier_code = clean_slug | append: '-BUY' | append: min_qty | append: '-' | append: tier_val | append: 'OFF' %}
 
             <div
               class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
               data-min-qty="{{ min_qty }}"
+              data-discount-type="{{ tier.discountType | default: 'PERCENTAGE' }}"
+              data-discount-value="{{ tier_val }}"
               data-discount="{{ disc_pct }}"
               data-code="{{ tier_code }}"
               data-label="{{ tier.label | default: '' }}"
@@ -136,7 +160,9 @@
                 <div class="bt-tier-info">
                   <span class="bt-tier-name">
                     Buy {{ min_qty }}
-                    {% if disc_pct > 0 %}
+                    {% if is_fixed_tier %}
+                      &middot; Save {{ fixed_amt | money }}
+                    {% elsif disc_pct > 0 %}
                       &middot; Save {{ disc_pct }}%
                     {% endif %}
                   </span>
@@ -146,7 +172,7 @@
 
               <div class="bt-tier-pricing">
                 <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
-                {% if disc_pct > 0 %}
+                {% if is_fixed_tier or disc_pct > 0 %}
                   <span class="bt-tier-price-compare">{{ original_total | money }}</span>
                 {% endif %}
               </div>
@@ -157,21 +183,35 @@
         {% if matched_collection_volume_rule != nil %}
           {% for tier in matched_collection_volume_rule.tiers %}
             {% assign min_qty = tier.minQuantity | default: 1 %}
-            {% assign disc_pct = tier.discountPercent | default: 0 %}
-            {% assign qty_key = ',' | append: min_qty | append: ',' %}
-
-            {% unless rendered_quantities contains qty_key %}
+            {% assign is_fixed_tier = false %}
+            {% if tier.discountType == 'FIXED_AMOUNT' %}
+              {% assign is_fixed_tier = true %}
+              {% assign tier_val = tier.discountValue | default: 100 %}
+              {% assign fixed_amt = tier_val | times: 100 %}
+              {% assign original_total = base_price | times: min_qty %}
+              {% assign discounted_total = original_total | minus: fixed_amt %}
+              {% if discounted_total < 0 %}{% assign discounted_total = 0 %}{% endif %}
+              {% assign disc_pct = 0 %}
+            {% else %}
+              {% assign tier_val = tier.discountPercent | default: tier.discountValue | default: 10 %}
+              {% assign disc_pct = tier_val %}
               {% assign original_total = base_price | times: min_qty %}
               {% assign discount_multiplier = 100 | minus: disc_pct %}
               {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+            {% endif %}
+            {% assign qty_key = ',' | append: min_qty | append: ',' %}
+
+            {% unless rendered_quantities contains qty_key %}
               {% assign per_item = discounted_total | divided_by: min_qty %}
               {% assign card_counter = card_counter | plus: 1 %}
 
               {% assign clean_col_slug = collection.title | slice: 0, 8 | upcase %}
-              {% assign tier_code = clean_col_slug | append: '-BUY' | append: min_qty | append: '-' | append: disc_pct | append: 'OFF' %}
+              {% assign tier_code = clean_col_slug | append: '-BUY' | append: min_qty | append: '-' | append: tier_val | append: 'OFF' %}
               <div
                 class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
                 data-min-qty="{{ min_qty }}"
+                data-discount-type="{{ tier.discountType | default: 'PERCENTAGE' }}"
+                data-discount-value="{{ tier_val }}"
                 data-discount="{{ disc_pct }}"
                 data-code="{{ tier_code }}"
                 data-label="{{ tier.label | default: '' }}"
@@ -188,7 +228,9 @@
                   <div class="bt-tier-info">
                     <span class="bt-tier-name">
                       Buy {{ min_qty }}
-                      {% if disc_pct > 0 %}
+                      {% if is_fixed_tier %}
+                        &middot; Save {{ fixed_amt | money }}
+                      {% elsif disc_pct > 0 %}
                         &middot; Save {{ disc_pct }}%
                       {% endif %}
                     </span>
@@ -198,7 +240,7 @@
 
                 <div class="bt-tier-pricing">
                   <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
-                  {% if disc_pct > 0 %}
+                  {% if is_fixed_tier or disc_pct > 0 %}
                     <span class="bt-tier-price-compare">{{ original_total | money }}</span>
                   {% endif %}
                 </div>
@@ -263,34 +305,88 @@
 
   <!-- 2. Frequently Bought Together Widget (SSR if configured) -->
   {% if matched_fbt_rule != nil %}
+    {% assign is_fixed_fbt = false %}
+    {% if matched_fbt_rule.discountType == 'FIXED_AMOUNT' %}
+      {% assign is_fixed_fbt = true %}
+      {% assign fbt_val = matched_fbt_rule.discountValue | default: 100 %}
+    {% else %}
+      {% assign fbt_val = matched_fbt_rule.discountValue | default: matched_fbt_rule.mainDiscountPercent | default: 10 %}
+    {% endif %}
+
+    {% assign target_str = matched_fbt_rule.targetGid | append: '' %}
+    {% assign is_current_trigger = false %}
+    {% if target_str contains current_product_id_str %}
+      {% assign is_current_trigger = true %}
+    {% endif %}
+
     {% assign base_variant = product.selected_or_first_available_variant %}
     {% assign base_price = base_variant.price %}
     {% assign main_disc_pct = matched_fbt_rule.mainDiscountPercent | default: 0 %}
 
+    {% assign base_disc_pct = main_disc_pct %}
+    {% if is_current_trigger == false %}
+      {% for comp in matched_fbt_rule.fbtProducts %}
+        {% assign comp_id_str = comp.productId | append: '' %}
+        {% if comp_id_str contains current_product_id_str %}
+          {% assign base_disc_pct = comp.discountPercent | default: fbt_val %}
+          {% break %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+
     {% assign initial_bundle_original = base_price %}
     {% assign initial_bundle_total = base_price %}
-    {% if main_disc_pct > 0 %}
-      {% assign main_mult = 100 | minus: main_disc_pct %}
-      {% assign initial_bundle_total = base_price | times: main_mult | divided_by: 100 %}
+    {% unless is_fixed_fbt %}
+      {% if base_disc_pct > 0 %}
+        {% assign main_mult = 100 | minus: base_disc_pct %}
+        {% assign initial_bundle_total = base_price | times: main_mult | divided_by: 100 %}
+      {% endif %}
+    {% endunless %}
+
+    {% if is_current_trigger == false and matched_fbt_rule.triggerProduct %}
+      {% assign trig = matched_fbt_rule.triggerProduct %}
+      {% assign t_price = trig.priceCents | default: 0 %}
+      {% assign initial_bundle_original = initial_bundle_original | plus: t_price %}
+      {% if is_fixed_fbt %}
+        {% assign initial_bundle_total = initial_bundle_total | plus: t_price %}
+      {% else %}
+        {% assign t_disc = main_disc_pct | default: fbt_val %}
+        {% assign t_mult = 100 | minus: t_disc %}
+        {% assign t_disc_amt = t_price | times: t_mult | divided_by: 100 %}
+        {% assign initial_bundle_total = initial_bundle_total | plus: t_disc_amt %}
+      {% endif %}
     {% endif %}
+
     {% for fbt in matched_fbt_rule.fbtProducts %}
-      {% assign f_price = fbt.priceCents | default: 0 %}
-      {% assign f_disc = fbt.discountPercent | default: 10 %}
-      {% assign f_mult = 100 | minus: f_disc %}
-      {% assign f_discounted = f_price | times: f_mult | divided_by: 100 %}
-      {% assign initial_bundle_original = initial_bundle_original | plus: f_price %}
-      {% assign initial_bundle_total = initial_bundle_total | plus: f_discounted %}
+      {% assign fbt_id_str = fbt.productId | append: '' %}
+      {% unless fbt_id_str contains current_product_id_str %}
+        {% assign f_price = fbt.priceCents | default: 0 %}
+        {% assign initial_bundle_original = initial_bundle_original | plus: f_price %}
+        {% if is_fixed_fbt %}
+          {% assign initial_bundle_total = initial_bundle_total | plus: f_price %}
+        {% else %}
+          {% assign f_disc = fbt.discountPercent | default: fbt_val %}
+          {% assign f_mult = 100 | minus: f_disc %}
+          {% assign f_discounted = f_price | times: f_mult | divided_by: 100 %}
+          {% assign initial_bundle_total = initial_bundle_total | plus: f_discounted %}
+        {% endif %}
+      {% endunless %}
     {% endfor %}
-    {% assign initial_savings = initial_bundle_original | minus: initial_bundle_total %}
+
+    {% if is_fixed_fbt %}
+      {% assign initial_savings = fbt_val | times: 100 %}
+      {% assign initial_bundle_total = initial_bundle_original | minus: initial_savings %}
+      {% if initial_bundle_total < 0 %}{% assign initial_bundle_total = 0 %}{% endif %}
+    {% else %}
+      {% assign initial_savings = initial_bundle_original | minus: initial_bundle_total %}
+    {% endif %}
     {% assign total_items_count = matched_fbt_rule.fbtProducts.size | plus: 1 %}
 
-    {% assign fbt_first_disc = matched_fbt_rule.fbtProducts[0].discountPercent | default: 10 %}
-    {% assign bundle_disc = main_disc_pct %}
-    {% if bundle_disc == 0 or bundle_disc == blank %}
-      {% assign bundle_disc = fbt_first_disc %}
+    {% assign bundle_code = matched_fbt_rule.discountCode %}
+    {% if bundle_code == blank %}
+      {% assign clean_fbt_slug = matched_fbt_rule.title | remove: 'Volume Tier:' | remove: 'Bundle for:' | strip | slice: 0, 8 | upcase %}
+      {% assign bundle_code = 'BUNDLE-' | append: clean_fbt_slug | append: '-' | append: fbt_val | append: 'OFF' %}
     {% endif %}
-    {% assign clean_fbt_slug = product.title | remove: 'Volume Tier:' | remove: 'Bundle for:' | strip | slice: 0, 8 | upcase %}
-    {% assign bundle_code = 'BUNDLE-' | append: clean_fbt_slug | append: '-' | append: bundle_disc | append: 'OFF' %}
 
     <div
       class="bt-widget-container bt-fbt-widget"
@@ -298,6 +394,8 @@
       data-base-variant-id="{{ base_variant.id }}"
       data-base-price="{{ base_price }}"
       data-base-discount="{{ main_disc_pct }}"
+      data-discount-type="{{ matched_fbt_rule.discountType | default: 'PERCENTAGE' }}"
+      data-discount-value="{{ fbt_val }}"
       data-base-title="{{ product.title | escape }}"
       data-code="{{ bundle_code }}"
       style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
@@ -330,30 +428,64 @@
             {% endif %}
           </div>
           <span class="bt-fbt-thumb-label">This item</span>
-          {% if main_disc_pct > 0 %}
-            <span class="bt-fbt-thumb-badge">-{{ main_disc_pct }}%</span>
-          {% endif %}
+          {% unless is_fixed_fbt %}
+            {% if base_disc_pct > 0 %}
+              <span class="bt-fbt-thumb-badge">-{{ base_disc_pct }}%</span>
+            {% endif %}
+          {% endunless %}
         </div>
 
-        {% for fbt in matched_fbt_rule.fbtProducts %}
+        {% if is_current_trigger == false and matched_fbt_rule.triggerProduct %}
+          {% assign trig = matched_fbt_rule.triggerProduct %}
           <div class="bt-fbt-plus-icon">+</div>
-          <div class="bt-fbt-thumb-card" data-fbt-card-id="{{ fbt.productId }}">
+          <div class="bt-fbt-thumb-card" data-fbt-card-id="{{ trig.id }}">
             <div class="bt-fbt-thumb-wrap">
-              {% if fbt.image != blank %}
+              {% if trig.image != blank %}
                 <img
-                  src="{{ fbt.image }}"
-                  alt="{{ fbt.title | escape }}"
+                  src="{{ trig.image }}"
+                  alt="{{ trig.title | escape }}"
                   class="bt-fbt-img"
                   loading="lazy"
                   width="80"
                   height="80"
                 >
               {% else %}
-                <div class="bt-fbt-no-img">{{ fbt.title | slice: 0, 10 }}</div>
+                <div class="bt-fbt-no-img">{{ trig.title | slice: 0, 10 }}</div>
               {% endif %}
             </div>
-            <span class="bt-fbt-thumb-badge">-{{ fbt.discountPercent | default: 10 }}%</span>
+            {% unless is_fixed_fbt %}
+              {% assign trig_disc = matched_fbt_rule.mainDiscountPercent | default: fbt_val %}
+              {% if trig_disc > 0 %}
+                <span class="bt-fbt-thumb-badge">-{{ trig_disc }}%</span>
+              {% endif %}
+            {% endunless %}
           </div>
+        {% endif %}
+
+        {% for fbt in matched_fbt_rule.fbtProducts %}
+          {% assign fbt_id_str = fbt.productId | append: '' %}
+          {% unless fbt_id_str contains current_product_id_str %}
+            <div class="bt-fbt-plus-icon">+</div>
+            <div class="bt-fbt-thumb-card" data-fbt-card-id="{{ fbt.productId }}">
+              <div class="bt-fbt-thumb-wrap">
+                {% if fbt.image != blank %}
+                  <img
+                    src="{{ fbt.image }}"
+                    alt="{{ fbt.title | escape }}"
+                    class="bt-fbt-img"
+                    loading="lazy"
+                    width="80"
+                    height="80"
+                  >
+                {% else %}
+                  <div class="bt-fbt-no-img">{{ fbt.title | slice: 0, 10 }}</div>
+                {% endif %}
+              </div>
+              {% unless is_fixed_fbt %}
+                <span class="bt-fbt-thumb-badge">-{{ fbt.discountPercent | default: 10 }}%</span>
+              {% endunless %}
+            </div>
+          {% endunless %}
         {% endfor %}
       </div>
 
@@ -362,15 +494,17 @@
           <input type="checkbox" checked disabled class="bt-fbt-checkbox bt-fbt-base-checkbox">
           <span class="bt-fbt-check-label">
             <strong>This item:</strong> {{ product.title }}
-            {% if main_disc_pct > 0 %}
-              <span class="bt-fbt-save-pill">Save {{ main_disc_pct }}%</span>
+            {% if is_fixed_fbt %}
+              <span class="bt-fbt-save-pill">Part of Bundle</span>
+            {% elsif base_disc_pct > 0 %}
+              <span class="bt-fbt-save-pill">Save {{ base_disc_pct }}%</span>
             {% endif %}
           </span>
           <span class="bt-fbt-row-price">
-            {% if main_disc_pct > 0 %}
-              {% assign main_mult = 100 | minus: main_disc_pct %}
-              {% assign main_disc_price = base_price | times: main_mult | divided_by: 100 %}
-              <span class="bt-fbt-price-discounted">{{ main_disc_price | money }}</span>
+            {% if is_fixed_fbt == false and base_disc_pct > 0 %}
+              {% assign base_mult = 100 | minus: base_disc_pct %}
+              {% assign base_disc_price = base_price | times: base_mult | divided_by: 100 %}
+              <span class="bt-fbt-price-discounted">{{ base_disc_price | money }}</span>
               <span class="bt-fbt-price-original">{{ base_price | money }}</span>
             {% else %}
               {{ base_price | money }}
@@ -378,36 +512,84 @@
           </span>
         </label>
 
-        {% for fbt in matched_fbt_rule.fbtProducts %}
-          {% assign fbt_price_cents = fbt.priceCents | default: 0 %}
-          {% assign fbt_disc_pct = fbt.discountPercent | default: 10 %}
-          {% assign disc_mult = 100 | minus: fbt_disc_pct %}
-          {% assign fbt_disc_price = fbt_price_cents | times: disc_mult | divided_by: 100 %}
+        {% if is_current_trigger == false and matched_fbt_rule.triggerProduct %}
+          {% assign trig = matched_fbt_rule.triggerProduct %}
+          {% assign trig_price_cents = trig.priceCents | default: 0 %}
+          {% assign trig_disc_pct = matched_fbt_rule.mainDiscountPercent | default: fbt_val %}
+          {% assign trig_disc_mult = 100 | minus: trig_disc_pct %}
+          {% assign trig_disc_price = trig_price_cents | times: trig_disc_mult | divided_by: 100 %}
 
           <label class="bt-fbt-row">
             <input
               type="checkbox"
               checked
               class="bt-fbt-checkbox bt-fbt-companion-checkbox"
-              data-product-id="{{ fbt.productId }}"
-              data-variant-id="{{ fbt.variantId }}"
-              data-title="{{ fbt.title | escape }}"
-              data-price="{{ fbt_price_cents }}"
-              data-discount="{{ fbt_disc_pct }}"
+              data-product-id="{{ trig.id }}"
+              data-variant-id="{{ trig.variantId }}"
+              data-title="{{ trig.title | escape }}"
+              data-price="{{ trig_price_cents }}"
+              data-discount="{{ trig_disc_pct }}"
             >
             <span class="bt-fbt-check-label">
-              {{ fbt.title }}
-              <span class="bt-fbt-save-pill">Save {{ fbt_disc_pct }}%</span>
+              {{ trig.title }}
+              {% if is_fixed_fbt %}
+                <span class="bt-fbt-save-pill">Part of Bundle</span>
+              {% elsif trig_disc_pct > 0 %}
+                <span class="bt-fbt-save-pill">Save {{ trig_disc_pct }}%</span>
+              {% endif %}
             </span>
             <span class="bt-fbt-row-price">
-              {% if fbt_price_cents > 0 %}
-                <span class="bt-fbt-price-discounted">{{ fbt_disc_price | money }}</span>
-                <span class="bt-fbt-price-original">{{ fbt_price_cents | money }}</span>
+              {% if is_fixed_fbt %}
+                {{ trig_price_cents | money }}
+              {% elsif trig_disc_pct > 0 %}
+                <span class="bt-fbt-price-discounted">{{ trig_disc_price | money }}</span>
+                <span class="bt-fbt-price-original">{{ trig_price_cents | money }}</span>
               {% else %}
-                <span class="bt-fbt-price-discounted">-{{ fbt_disc_pct }}%</span>
+                {{ trig_price_cents | money }}
               {% endif %}
             </span>
           </label>
+        {% endif %}
+
+        {% for fbt in matched_fbt_rule.fbtProducts %}
+          {% assign fbt_id_str = fbt.productId | append: '' %}
+          {% unless fbt_id_str contains current_product_id_str %}
+            {% assign fbt_price_cents = fbt.priceCents | default: 0 %}
+            {% assign fbt_disc_pct = fbt.discountPercent | default: 10 %}
+            {% assign disc_mult = 100 | minus: fbt_disc_pct %}
+            {% assign fbt_disc_price = fbt_price_cents | times: disc_mult | divided_by: 100 %}
+
+            <label class="bt-fbt-row">
+              <input
+                type="checkbox"
+                checked
+                class="bt-fbt-checkbox bt-fbt-companion-checkbox"
+                data-product-id="{{ fbt.productId }}"
+                data-variant-id="{{ fbt.variantId }}"
+                data-title="{{ fbt.title | escape }}"
+                data-price="{{ fbt_price_cents }}"
+                data-discount="{{ fbt_disc_pct }}"
+              >
+              <span class="bt-fbt-check-label">
+                {{ fbt.title }}
+                {% if is_fixed_fbt %}
+                  <span class="bt-fbt-save-pill">Part of Bundle</span>
+                {% elsif fbt_disc_pct > 0 %}
+                  <span class="bt-fbt-save-pill">Save {{ fbt_disc_pct }}%</span>
+                {% endif %}
+              </span>
+              <span class="bt-fbt-row-price">
+                {% if is_fixed_fbt %}
+                  {{ fbt_price_cents | money }}
+                {% elsif fbt_price_cents > 0 %}
+                  <span class="bt-fbt-price-discounted">{{ fbt_disc_price | money }}</span>
+                  <span class="bt-fbt-price-original">{{ fbt_price_cents | money }}</span>
+                {% else %}
+                  <span class="bt-fbt-price-discounted">-{{ fbt_disc_pct }}%</span>
+                {% endif %}
+              </span>
+            </label>
+          {% endunless %}
         {% endfor %}
       </div>
 

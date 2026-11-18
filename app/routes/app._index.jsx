@@ -38,6 +38,9 @@ export const loader = async ({ request }) => {
       }
       let parsedFbt = [];
       let mainDiscountPercent = 0;
+      let fbtDiscountType = "PERCENTAGE";
+      let fbtDiscountValue = 0;
+      let triggerProduct = null;
       try {
         const rawFbt = JSON.parse(r.fbtProducts || "[]");
         if (Array.isArray(rawFbt)) {
@@ -45,6 +48,9 @@ export const loader = async ({ request }) => {
         } else if (rawFbt && rawFbt.companions) {
           parsedFbt = rawFbt.companions;
           mainDiscountPercent = Number(rawFbt.mainDiscountPercent || 0);
+          fbtDiscountType = rawFbt.discountType || "PERCENTAGE";
+          fbtDiscountValue = Number(rawFbt.discountValue ?? (rawFbt.mainDiscountPercent || 0));
+          triggerProduct = rawFbt.triggerProduct || null;
         }
       } catch (e) {
         parsedFbt = [];
@@ -53,7 +59,10 @@ export const loader = async ({ request }) => {
       return {
         ...r,
         ruleType: isFbt ? "FBT" : "VOLUME",
+        discountType: isFbt ? fbtDiscountType : (parsedTiers[0]?.discountType || "PERCENTAGE"),
+        discountValue: isFbt ? fbtDiscountValue : (parsedTiers[0]?.discountValue ?? parsedTiers[0]?.discountPercent ?? 0),
         mainDiscountPercent,
+        triggerProduct,
         tiers: parsedTiers,
         fbtProducts: parsedFbt,
       };
@@ -124,7 +133,12 @@ export const action = async ({ request }) => {
       const title = formData.get("title") || "Frequently Bought Together";
       const targetGid = formData.get("targetGid");
       const fbtProducts = formData.get("fbtProducts") || "[]";
+      const discountType = formData.get("discountType") || "PERCENTAGE";
+      const discountValue = parseFloat(formData.get("discountValue") || "0") || 0;
       const mainDiscountPercent = parseFloat(formData.get("mainDiscountPercent") || "0") || 0;
+      const triggerProductStr = formData.get("triggerProduct") || "null";
+      let triggerProduct = null;
+      try { triggerProduct = JSON.parse(triggerProductStr); } catch {}
       const active = formData.get("active") !== "false";
 
       if (!targetGid) {
@@ -137,7 +151,10 @@ export const action = async ({ request }) => {
       }
 
       const fbtDataToSave = JSON.stringify({
+        discountType,
+        discountValue: discountValue || (discountType === "PERCENTAGE" ? (mainDiscountPercent || 10) : 100),
         mainDiscountPercent,
+        triggerProduct,
         companions: parsedFbt,
       });
 
@@ -229,6 +246,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       }
       let parsedFbt = [];
       let mainDiscountPercent = 0;
+      let fbtDiscountType = "PERCENTAGE";
+      let fbtDiscountValue = 0;
+      let triggerProduct = null;
       try {
         const rawFbt = JSON.parse(r.fbtProducts || "[]");
         if (Array.isArray(rawFbt)) {
@@ -236,6 +256,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         } else if (rawFbt && rawFbt.companions) {
           parsedFbt = rawFbt.companions;
           mainDiscountPercent = Number(rawFbt.mainDiscountPercent || 0);
+          fbtDiscountType = rawFbt.discountType || "PERCENTAGE";
+          fbtDiscountValue = Number(rawFbt.discountValue ?? (rawFbt.mainDiscountPercent || 0));
+          triggerProduct = rawFbt.triggerProduct || null;
         }
       } catch (e) {
         parsedFbt = [];
@@ -247,7 +270,10 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         ruleType: isFbt ? "FBT" : "VOLUME",
         targetType: r.targetType,
         targetGid: r.targetGid,
+        discountType: isFbt ? fbtDiscountType : (parsedTiers[0]?.discountType || "PERCENTAGE"),
+        discountValue: isFbt ? fbtDiscountValue : (parsedTiers[0]?.discountValue ?? parsedTiers[0]?.discountPercent ?? 0),
         mainDiscountPercent,
+        triggerProduct,
         tiers: parsedTiers,
         fbtProducts: parsedFbt,
         active: true,
@@ -256,6 +282,54 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
 
     // Fetch products for each collection rule to enable instant storefront cart splitting
     for (const rule of activeRulesPayload) {
+      const cleanName = rule.title
+        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toUpperCase()
+        .slice(0, 8) || "OFFER";
+
+      const isFixed = rule.discountType === "FIXED_AMOUNT";
+      const val = Number(isFixed ? rule.discountValue : (rule.mainDiscountPercent || rule.discountValue || rule.fbtProducts?.[0]?.discountPercent || 10));
+
+      if (rule.ruleType === "FBT") {
+        rule.discountCode = `BUNDLE-${cleanName}-${val}OFF`;
+
+        if ((!rule.triggerProduct || !rule.triggerProduct.variantId) && rule.targetGid) {
+          try {
+            const prodRes = await admin.graphql(
+              `query GetTriggerProd($id: ID!) {
+                product(id: $id) {
+                  id
+                  title
+                  featuredImage { url }
+                  variants(first: 1) {
+                    nodes {
+                      id
+                      price
+                    }
+                  }
+                }
+              }`,
+              { variables: { id: rule.targetGid } }
+            );
+            const prodJson = await prodRes.json();
+            const pData = prodJson?.data?.product;
+            if (pData) {
+              const v = pData.variants?.nodes?.[0];
+              rule.triggerProduct = {
+                id: pData.id,
+                title: pData.title,
+                priceCents: v?.price ? Math.round(parseFloat(v.price) * 100) : 0,
+                image: pData.featuredImage?.url || "",
+                variantId: v?.id ? String(v.id).replace(/\D/g, "") : "",
+              };
+            }
+          } catch (err) {
+            console.warn("[AutoTriggerProduct]", err);
+          }
+        }
+      }
+
       if (rule.targetType === "COLLECTION" && rule.targetGid) {
         try {
           const colRes = await admin.graphql(
@@ -397,18 +471,23 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
 
         if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
           for (const tier of rule.tiers) {
-            if (tier.minQuantity > 0 && tier.discountPercent > 0) {
-              const autoTitle = `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`;
-              const codeTitle = `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`;
-              const code = `${cleanName}-BUY${tier.minQuantity}-${tier.discountPercent}OFF`;
+            const isFixed = tier.discountType === "FIXED_AMOUNT";
+            const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue));
+            if (tier.minQuantity > 0 && val > 0) {
+              const valDisplay = isFixed ? `₹${val}` : `${val}%`;
+              const autoTitle = `[Volume] ${rule.title} - ${tier.minQuantity}+ (${valDisplay} OFF)`;
+              const codeTitle = `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${valDisplay} OFF)`;
+              const code = `${cleanName}-BUY${tier.minQuantity}-${val}OFF`;
 
               expectedDiscounts.push({
                 type: "VOLUME",
+                discountType: isFixed ? "FIXED_AMOUNT" : "PERCENTAGE",
+                discountValue: val,
+                discountPercent: isFixed ? 0 : val,
                 autoTitle,
                 codeTitle,
                 code,
                 minQuantity: tier.minQuantity,
-                discountPercent: tier.discountPercent,
                 targetType: rule.targetType,
                 targetGid: rule.targetGid,
                 targetGids: [rule.targetGid],
@@ -420,23 +499,24 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
             .map((p) => (p.productId?.startsWith("gid://") ? p.productId : "gid://shopify/Product/" + p.productId))
             .filter(Boolean);
           const allBundleGids = [rule.targetGid, ...companionGids];
-          const bundleDiscountPct =
-            Number(rule.mainDiscountPercent) > 0
-              ? Number(rule.mainDiscountPercent)
-              : Number(rule.fbtProducts[0]?.discountPercent) || 10;
+          const isFixed = rule.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? rule.discountValue : (rule.mainDiscountPercent || rule.discountValue || rule.fbtProducts[0]?.discountPercent || 10));
+          const valDisplay = isFixed ? `₹${val}` : `${val}%`;
           const bundleMinQty = allBundleGids.length;
 
-          const autoTitle = `[Bundle] ${rule.title} (${bundleDiscountPct}% OFF)`;
-          const codeTitle = `[Bundle Code] ${rule.title} (${bundleDiscountPct}% OFF)`;
-          const code = `BUNDLE-${cleanName}-${bundleDiscountPct}OFF`;
+          const autoTitle = `[Bundle] ${rule.title} (${valDisplay} OFF)`;
+          const codeTitle = `[Bundle Code] ${rule.title} (${valDisplay} OFF)`;
+          const code = `BUNDLE-${cleanName}-${val}OFF`;
 
           expectedDiscounts.push({
             type: "FBT",
+            discountType: isFixed ? "FIXED_AMOUNT" : "PERCENTAGE",
+            discountValue: val,
+            discountPercent: isFixed ? 0 : val,
             autoTitle,
             codeTitle,
             code,
             minQuantity: bundleMinQty,
-            discountPercent: bundleDiscountPct,
             targetType: "PRODUCT",
             targetGid: rule.targetGid,
             targetGids: allBundleGids,
@@ -512,7 +592,10 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                   title: exp.autoTitle,
                   startsAt: new Date().toISOString(),
                   customerGets: {
-                    value: { percentage: Number(exp.discountPercent) / 100 },
+                    value:
+                      exp.discountType === "FIXED_AMOUNT"
+                        ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
+                        : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
                     items:
                       exp.targetType === "COLLECTION"
                         ? { collections: { collectionsToAdd: [exp.targetGid] } }
@@ -569,7 +652,10 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                     all: true,
                   },
                   customerGets: {
-                    value: { percentage: Number(exp.discountPercent) / 100 },
+                    value:
+                      exp.discountType === "FIXED_AMOUNT"
+                        ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
+                        : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
                     items:
                       exp.targetType === "COLLECTION"
                         ? { collections: { collectionsToAdd: [exp.targetGid] } }
@@ -639,7 +725,10 @@ export default function BundleTierIndex() {
   const [fbtTitle, setFbtTitle] = useState("Frequently Bought Together");
   const [fbtTargetGid, setFbtTargetGid] = useState("");
   const [fbtTargetTitle, setFbtTargetTitle] = useState("");
+  const [fbtDiscountType, setFbtDiscountType] = useState("PERCENTAGE");
+  const [fbtDiscountValue, setFbtDiscountValue] = useState("10");
   const [fbtMainDiscount, setFbtMainDiscount] = useState("0");
+  const [fbtTriggerProduct, setFbtTriggerProduct] = useState(null);
   const [fbtCompanions, setFbtCompanions] = useState([]);
 
   useEffect(() => {
@@ -665,7 +754,10 @@ export default function BundleTierIndex() {
     setFbtTitle("Frequently Bought Together");
     setFbtTargetGid("");
     setFbtTargetTitle("");
+    setFbtDiscountType("PERCENTAGE");
+    setFbtDiscountValue("10");
     setFbtMainDiscount("0");
+    setFbtTriggerProduct(null);
     setFbtCompanions([]);
   };
 
@@ -683,7 +775,12 @@ export default function BundleTierIndex() {
     setVolumeTargetType(rule.targetType);
     setVolumeTargetGid(rule.targetGid);
     setVolumeTargetTitle(rule.title);
-    setTiers(rule.tiers || []);
+    setTiers((rule.tiers || []).map((t) => ({
+      ...t,
+      discountType: t.discountType || "PERCENTAGE",
+      discountValue: t.discountValue ?? (t.discountPercent || 10),
+      discountPercent: t.discountPercent ?? t.discountValue ?? 10,
+    })));
     setIsVolumeModalOpen(true);
   };
 
@@ -717,10 +814,18 @@ export default function BundleTierIndex() {
 
   const addTierRow = () => {
     const nextQty = tiers.length > 0 ? (tiers[tiers.length - 1].minQuantity || 1) + 1 : 2;
-    const nextPct = tiers.length > 0 ? (tiers[tiers.length - 1].discountPercent || 0) + 5 : 10;
+    const lastType = tiers.length > 0 ? (tiers[tiers.length - 1].discountType || "PERCENTAGE") : "PERCENTAGE";
+    const nextVal = tiers.length > 0 ? (tiers[tiers.length - 1].discountValue || 10) + (lastType === "PERCENTAGE" ? 5 : 50) : (lastType === "PERCENTAGE" ? 10 : 100);
+    const label = lastType === "PERCENTAGE" ? `Buy ${nextQty} - Save ${nextVal}%` : `Buy ${nextQty} - Save ₹${nextVal}`;
     setTiers([
       ...tiers,
-      { minQuantity: nextQty, discountPercent: nextPct, label: `Buy ${nextQty} - Save ${nextPct}%` },
+      {
+        minQuantity: nextQty,
+        discountType: lastType,
+        discountValue: nextVal,
+        discountPercent: lastType === "PERCENTAGE" ? nextVal : 0,
+        label,
+      },
     ]);
   };
 
@@ -730,9 +835,31 @@ export default function BundleTierIndex() {
 
   const updateTierField = (index, field, value) => {
     const next = [...tiers];
-    next[index][field] = field === "label" ? value : Number(value);
-    if (field === "minQuantity" || field === "discountPercent") {
-      next[index].label = `Buy ${next[index].minQuantity} - Save ${next[index].discountPercent}%`;
+    if (field === "discountType") {
+      next[index].discountType = value;
+      const isFixed = value === "FIXED_AMOUNT";
+      const val = next[index].discountValue || (isFixed ? 100 : 10);
+      next[index].discountValue = val;
+      next[index].discountPercent = isFixed ? 0 : val;
+      next[index].label = isFixed ? `Buy ${next[index].minQuantity} - Save ₹${val}` : `Buy ${next[index].minQuantity} - Save ${val}%`;
+    } else if (field === "discountValue") {
+      const num = Number(value);
+      next[index].discountValue = num;
+      if (next[index].discountType === "FIXED_AMOUNT") {
+        next[index].discountPercent = 0;
+        next[index].label = `Buy ${next[index].minQuantity} - Save ₹${num}`;
+      } else {
+        next[index].discountPercent = num;
+        next[index].label = `Buy ${next[index].minQuantity} - Save ${num}%`;
+      }
+    } else if (field === "minQuantity") {
+      const num = Number(value);
+      next[index].minQuantity = num;
+      const isFixed = next[index].discountType === "FIXED_AMOUNT";
+      const val = next[index].discountValue || (isFixed ? 100 : 10);
+      next[index].label = isFixed ? `Buy ${num} - Save ₹${val}` : `Buy ${num} - Save ${val}%`;
+    } else if (field === "label") {
+      next[index].label = value;
     }
     setTiers(next);
   };
@@ -762,7 +889,10 @@ export default function BundleTierIndex() {
     setFbtTitle(rule.title);
     setFbtTargetGid(rule.targetGid);
     setFbtTargetTitle(rule.title);
+    setFbtDiscountType(rule.discountType || "PERCENTAGE");
+    setFbtDiscountValue(String(rule.discountValue ?? (rule.mainDiscountPercent || 10)));
     setFbtMainDiscount(String(rule.mainDiscountPercent || "0"));
+    setFbtTriggerProduct(rule.triggerProduct || null);
     setFbtCompanions(rule.fbtProducts || []);
     setIsFbtModalOpen(true);
   };
@@ -774,9 +904,20 @@ export default function BundleTierIndex() {
         multiple: false,
       });
       if (selected && selected.length > 0) {
-        setFbtTargetGid(selected[0].id);
-        setFbtTargetTitle(selected[0].title);
-        setFbtTitle(`Bundle for: ${selected[0].title}`);
+        const prod = selected[0];
+        setFbtTargetGid(prod.id);
+        setFbtTargetTitle(prod.title);
+        setFbtTitle(`Bundle for: ${prod.title}`);
+        const firstVariant = prod.variants?.[0];
+        const rawPrice = firstVariant?.price ? Math.round(parseFloat(firstVariant.price) * 100) : 0;
+        const imgUrl = prod.images?.[0]?.originalSrc || "";
+        setFbtTriggerProduct({
+          id: prod.id,
+          title: prod.title,
+          priceCents: rawPrice,
+          image: imgUrl,
+          variantId: firstVariant?.id ? String(firstVariant.id).replace(/\D/g, "") : "",
+        });
       }
     } catch (e) {
       console.warn("[FbtTriggerPicker]", e);
@@ -826,7 +967,12 @@ export default function BundleTierIndex() {
     if (editingFbtId) fd.append("id", editingFbtId);
     fd.append("title", fbtTitle);
     fd.append("targetGid", fbtTargetGid);
-    fd.append("mainDiscountPercent", fbtMainDiscount || "0");
+    fd.append("discountType", fbtDiscountType);
+    fd.append("discountValue", fbtDiscountValue || "0");
+    fd.append("mainDiscountPercent", fbtDiscountType === "PERCENTAGE" ? (fbtDiscountValue || "10") : "0");
+    if (fbtTriggerProduct) {
+      fd.append("triggerProduct", JSON.stringify(fbtTriggerProduct));
+    }
     fd.append("fbtProducts", JSON.stringify(fbtCompanions));
     fd.append("active", "true");
     fetcher.submit(fd, { method: "POST" });
@@ -977,11 +1123,13 @@ export default function BundleTierIndex() {
                           <s-table-cell>
                             <s-stack direction="block" gap="extra-tight">
                               {rule.tiers.map((t, i) => {
-                                const code = `${cleanName}-BUY${t.minQuantity}-${t.discountPercent}OFF`;
+                                const isFixed = t.discountType === "FIXED_AMOUNT";
+                                const val = t.discountValue ?? (t.discountPercent || 10);
+                                const code = `${cleanName}-BUY${t.minQuantity}-${val}OFF`;
                                 return (
                                   <div key={i} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
                                     <s-badge tone="success">
-                                      {t.minQuantity}+ ({t.discountPercent}%)
+                                      {t.minQuantity}+ ({isFixed ? `₹${val}` : `${val}%`} OFF)
                                     </s-badge>
                                     <span style={{ fontSize: "0.75rem", fontFamily: "monospace", background: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#202223" }}>
                                       Code: {code}
@@ -1069,17 +1217,16 @@ export default function BundleTierIndex() {
                         .replace(/[^a-zA-Z0-9]/g, "")
                         .toUpperCase()
                         .slice(0, 8) || "BUNDLE";
-                      const bundlePct = Number(rule.mainDiscountPercent) > 0 ? Number(rule.mainDiscountPercent) : Number(rule.fbtProducts[0]?.discountPercent) || 10;
-                      const code = `BUNDLE-${cleanName}-${bundlePct}OFF`;
+                      const isFixed = rule.discountType === "FIXED_AMOUNT";
+                      const bundleVal = Number(rule.discountValue ?? (rule.mainDiscountPercent || rule.fbtProducts[0]?.discountPercent || 10));
+                      const code = `BUNDLE-${cleanName}-${bundleVal}OFF`;
                       return (
                         <s-table-row key={rule.id}>
                           <s-table-cell>
                             <s-text type="strong">{rule.title}</s-text>
-                            {rule.mainDiscountPercent > 0 && (
-                              <span style={{ marginLeft: "8px", fontSize: "0.75rem", background: "#e3f1df", color: "#008060", padding: "2px 6px", borderRadius: "4px", fontWeight: 700 }}>
-                                Main: -{rule.mainDiscountPercent}%
-                              </span>
-                            )}
+                            <span style={{ marginLeft: "8px", fontSize: "0.75rem", background: isFixed ? "#eaf2fd" : "#e3f1df", color: isFixed ? "#005bd3" : "#008060", padding: "2px 6px", borderRadius: "4px", fontWeight: 700 }}>
+                              {isFixed ? `Bundle: -₹${bundleVal} OFF` : `Bundle: -${bundleVal}% OFF`}
+                            </span>
                           </s-table-cell>
                           <s-table-cell>
                             <s-badge tone="info">Product</s-badge>
@@ -1089,7 +1236,7 @@ export default function BundleTierIndex() {
                               <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "4px" }}>
                                 {rule.fbtProducts.map((p, i) => (
                                   <s-badge key={i} tone="success">
-                                    {p.title} (-{p.discountPercent}%)
+                                    {p.title} {isFixed ? "" : `(-${p.discountPercent || bundleVal}%)`}
                                   </s-badge>
                                 ))}
                               </div>
@@ -1295,7 +1442,7 @@ export default function BundleTierIndex() {
                           border: "1px solid #eee",
                         }}
                       >
-                        <div style={{ width: "90px" }}>
+                        <div style={{ width: "80px" }}>
                           <span style={{ fontSize: "0.75rem", color: "#666" }}>Min Qty</span>
                           <input
                             type="number"
@@ -1305,14 +1452,25 @@ export default function BundleTierIndex() {
                             style={{ width: "100%", padding: "4px 8px", borderRadius: "4px", border: "1px solid #ccc" }}
                           />
                         </div>
+                        <div style={{ width: "105px" }}>
+                          <span style={{ fontSize: "0.75rem", color: "#666" }}>Type</span>
+                          <select
+                            value={tier.discountType || "PERCENTAGE"}
+                            onChange={(e) => updateTierField(idx, "discountType", e.target.value)}
+                            style={{ width: "100%", padding: "4px 6px", borderRadius: "4px", border: "1px solid #ccc", background: "#fff" }}
+                          >
+                            <option value="PERCENTAGE">% OFF</option>
+                            <option value="FIXED_AMOUNT">₹ OFF</option>
+                          </select>
+                        </div>
                         <div style={{ width: "90px" }}>
-                          <span style={{ fontSize: "0.75rem", color: "#666" }}>Discount %</span>
+                          <span style={{ fontSize: "0.75rem", color: "#666" }}>Value</span>
                           <input
                             type="number"
                             min="1"
-                            max="100"
-                            value={tier.discountPercent}
-                            onChange={(e) => updateTierField(idx, "discountPercent", e.target.value)}
+                            max={tier.discountType === "FIXED_AMOUNT" ? 999999 : 100}
+                            value={tier.discountValue ?? (tier.discountPercent || 10)}
+                            onChange={(e) => updateTierField(idx, "discountValue", e.target.value)}
                             style={{ width: "100%", padding: "4px 8px", borderRadius: "4px", border: "1px solid #ccc" }}
                           />
                         </div>
@@ -1460,23 +1618,54 @@ export default function BundleTierIndex() {
                 </div>
               </div>
 
-              {/* Main / Trigger Product Discount % */}
+              {/* Discount Type Selector: Percentage vs Fixed Amount */}
+              <div>
+                <label style={{ display: "block", fontWeight: 600, marginBottom: "8px" }}>
+                  Bundle Discount Type
+                </label>
+                <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontWeight: 500 }}>
+                    <input
+                      type="radio"
+                      name="fbtDiscountType"
+                      value="PERCENTAGE"
+                      checked={fbtDiscountType === "PERCENTAGE"}
+                      onChange={() => setFbtDiscountType("PERCENTAGE")}
+                    />
+                    Percentage (% OFF)
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontWeight: 500 }}>
+                    <input
+                      type="radio"
+                      name="fbtDiscountType"
+                      value="FIXED_AMOUNT"
+                      checked={fbtDiscountType === "FIXED_AMOUNT"}
+                      onChange={() => setFbtDiscountType("FIXED_AMOUNT")}
+                    />
+                    Fixed Amount (₹ OFF)
+                  </label>
+                </div>
+              </div>
+
+              {/* Discount Value Input */}
               <div>
                 <label style={{ display: "block", fontWeight: 600, marginBottom: "4px" }}>
-                  Main Product Discount % (Optional)
+                  {fbtDiscountType === "PERCENTAGE" ? "Bundle Discount Percentage (%)" : "Bundle Discount Amount (₹)"}
                 </label>
                 <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
                   <input
                     type="number"
-                    min="0"
-                    max="100"
-                    value={fbtMainDiscount}
-                    onChange={(e) => setFbtMainDiscount(e.target.value)}
-                    placeholder="0"
-                    style={{ width: "120px", padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc" }}
+                    min="1"
+                    max={fbtDiscountType === "PERCENTAGE" ? 100 : 999999}
+                    value={fbtDiscountValue}
+                    onChange={(e) => setFbtDiscountValue(e.target.value)}
+                    placeholder={fbtDiscountType === "PERCENTAGE" ? "10" : "150"}
+                    style={{ width: "140px", padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc" }}
                   />
                   <span style={{ fontSize: "0.85rem", color: "#666" }}>
-                    % discount applied to the main trigger product in this bundle (0 = full price)
+                    {fbtDiscountType === "PERCENTAGE"
+                      ? "% discount applied to bundle items when purchased together"
+                      : "Flat ₹ discount deducted from total when bundle items are purchased together"}
                   </span>
                 </div>
               </div>
@@ -1549,20 +1738,28 @@ export default function BundleTierIndex() {
                         <div style={{ flex: 1 }}>
                           <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{comp.title}</div>
                           <div style={{ fontSize: "0.75rem", color: "#666" }}>
-                            Price: ${(comp.priceCents / 100).toFixed(2)}
+                            Price: ₹{(comp.priceCents / 100).toFixed(2)}
                           </div>
                         </div>
-                        <div style={{ width: "110px" }}>
-                          <span style={{ fontSize: "0.75rem", color: "#666" }}>Discount %</span>
-                          <input
-                            type="number"
-                            min="1"
-                            max="100"
-                            value={comp.discountPercent}
-                            onChange={(e) => updateCompanionDiscount(idx, e.target.value)}
-                            style={{ width: "100%", padding: "4px 8px", borderRadius: "4px", border: "1px solid #ccc" }}
-                          />
-                        </div>
+                        {fbtDiscountType === "PERCENTAGE" ? (
+                          <div style={{ width: "110px" }}>
+                            <span style={{ fontSize: "0.75rem", color: "#666" }}>Discount %</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="100"
+                              value={comp.discountPercent}
+                              onChange={(e) => updateCompanionDiscount(idx, e.target.value)}
+                              style={{ width: "100%", padding: "4px 8px", borderRadius: "4px", border: "1px solid #ccc" }}
+                            />
+                          </div>
+                        ) : (
+                          <div style={{ width: "130px", textAlign: "right" }}>
+                            <span style={{ fontSize: "0.75rem", color: "#008060", fontWeight: 600 }}>
+                              Part of Bundle
+                            </span>
+                          </div>
+                        )}
                         <button
                           type="button"
                           onClick={() => removeCompanionRow(idx)}

@@ -65,27 +65,86 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       let tiers = [];
       let fbtProducts = [];
       let mainDiscountPercent = 0;
+      let fbtDiscountType = "PERCENTAGE";
+      let fbtDiscountValue = 0;
+      let triggerProduct = null;
       try { tiers = JSON.parse(r.tiers || "[]"); } catch {}
       try {
         const rawFbt = JSON.parse(r.fbtProducts || "[]");
-        if (Array.isArray(rawFbt)) fbtProducts = rawFbt;
-        else if (rawFbt?.companions) {
+        if (Array.isArray(rawFbt)) {
+          fbtProducts = rawFbt;
+        } else if (rawFbt?.companions) {
           fbtProducts = rawFbt.companions;
           mainDiscountPercent = Number(rawFbt.mainDiscountPercent || 0);
+          fbtDiscountType = rawFbt.discountType || "PERCENTAGE";
+          fbtDiscountValue = Number(rawFbt.discountValue ?? (rawFbt.mainDiscountPercent || 0));
+          triggerProduct = rawFbt.triggerProduct || null;
         }
       } catch {}
+      const isFbt = fbtProducts.length > 0 && tiers.length === 0;
+      const cleanName = r.title
+        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toUpperCase()
+        .slice(0, 8) || (isFbt ? "BUNDLE" : "OFFER");
+
+      const discType = isFbt ? fbtDiscountType : (tiers[0]?.discountType || "PERCENTAGE");
+      const isFixed = discType === "FIXED_AMOUNT";
+      const discVal = Number(isFixed ? (isFbt ? fbtDiscountValue : tiers[0]?.discountValue) : (isFbt ? (fbtDiscountValue || mainDiscountPercent || fbtProducts[0]?.discountPercent || 10) : (tiers[0]?.discountValue ?? tiers[0]?.discountPercent ?? 0)));
+      const discountCode = isFbt ? `BUNDLE-${cleanName}-${discVal}OFF` : "";
+
       return {
         id: r.id,
         title: r.title,
-        ruleType: fbtProducts.length > 0 && tiers.length === 0 ? "FBT" : "VOLUME",
+        ruleType: isFbt ? "FBT" : "VOLUME",
         targetType: r.targetType,
         targetGid: r.targetGid,
+        discountType: discType,
+        discountValue: discVal,
+        discountCode,
         mainDiscountPercent,
+        triggerProduct,
         tiers,
         fbtProducts,
         active: true,
       };
     });
+
+    for (const rule of activeRulesPayload) {
+      if (rule.ruleType === "FBT" && (!rule.triggerProduct || !rule.triggerProduct.variantId) && rule.targetGid) {
+        try {
+          const prodRes = await graphql(
+            `query GetTriggerProd($id: ID!) {
+              product(id: $id) {
+                id
+                title
+                featuredImage { url }
+                variants(first: 1) {
+                  nodes {
+                    id
+                    price
+                  }
+                }
+              }
+            }`,
+            { id: rule.targetGid }
+          );
+          const pData = prodRes?.data?.product;
+          if (pData) {
+            const v = pData.variants?.nodes?.[0];
+            rule.triggerProduct = {
+              id: pData.id,
+              title: pData.title,
+              priceCents: v?.price ? Math.round(parseFloat(v.price) * 100) : 0,
+              image: pData.featuredImage?.url || "",
+              variantId: v?.id ? String(v.id).replace(/\D/g, "") : "",
+            };
+          }
+        } catch (err) {
+          console.warn("[AutoTriggerProduct]", err);
+        }
+      }
+    }
 
     const configPayload = {
       collectionIds: activeRulesPayload.filter(r => r.targetType === "COLLECTION").map(r => r.targetGid),
@@ -169,14 +228,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
         for (const tier of rule.tiers) {
-          if (tier.minQuantity > 0 && tier.discountPercent > 0) {
+          const isFixed = tier.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue));
+          if (tier.minQuantity > 0 && val > 0) {
+            const valDisplay = isFixed ? `₹${val}` : `${val}%`;
             expectedDiscounts.push({
               type: "VOLUME",
-              autoTitle: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
-              codeTitle: `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
-              code: `${cleanName}-BUY${tier.minQuantity}-${tier.discountPercent}OFF`,
+              discountType: isFixed ? "FIXED_AMOUNT" : "PERCENTAGE",
+              discountValue: val,
+              discountPercent: isFixed ? 0 : val,
+              autoTitle: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${valDisplay} OFF)`,
+              codeTitle: `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${valDisplay} OFF)`,
+              code: `${cleanName}-BUY${tier.minQuantity}-${val}OFF`,
               minQuantity: tier.minQuantity,
-              discountPercent: tier.discountPercent,
               targetType: rule.targetType,
               targetGid: rule.targetGid,
               targetGids: [rule.targetGid],
@@ -188,18 +252,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           .map((p: any) => (p.productId?.startsWith("gid://") ? p.productId : "gid://shopify/Product/" + p.productId))
           .filter(Boolean);
         const allBundleGids = [rule.targetGid, ...companionGids];
-        const bundleDiscountPct =
-          Number(rule.mainDiscountPercent) > 0
-            ? Number(rule.mainDiscountPercent)
-            : Number(rule.fbtProducts[0]?.discountPercent) || 10;
+        const isFixed = rule.discountType === "FIXED_AMOUNT";
+        const val = Number(isFixed ? rule.discountValue : (rule.mainDiscountPercent || rule.discountValue || rule.fbtProducts[0]?.discountPercent || 10));
+        const valDisplay = isFixed ? `₹${val}` : `${val}%`;
 
         expectedDiscounts.push({
           type: "FBT",
-          autoTitle: `[Bundle] ${rule.title} (${bundleDiscountPct}% OFF)`,
-          codeTitle: `[Bundle Code] ${rule.title} (${bundleDiscountPct}% OFF)`,
-          code: `BUNDLE-${cleanName}-${bundleDiscountPct}OFF`,
+          discountType: isFixed ? "FIXED_AMOUNT" : "PERCENTAGE",
+          discountValue: val,
+          discountPercent: isFixed ? 0 : val,
+          autoTitle: `[Bundle] ${rule.title} (${valDisplay} OFF)`,
+          codeTitle: `[Bundle Code] ${rule.title} (${valDisplay} OFF)`,
+          code: `BUNDLE-${cleanName}-${val}OFF`,
           minQuantity: allBundleGids.length,
-          discountPercent: bundleDiscountPct,
           targetType: "PRODUCT",
           targetGid: rule.targetGid,
           targetGids: allBundleGids,
@@ -257,7 +322,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               title: exp.autoTitle,
               startsAt: new Date().toISOString(),
               customerGets: {
-                value: { percentage: Number(exp.discountPercent) / 100 },
+                value:
+                  exp.discountType === "FIXED_AMOUNT"
+                    ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
+                    : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
                 items: exp.targetType === "COLLECTION"
                   ? { collections: { collectionsToAdd: [exp.targetGid] } }
                   : { products: { productsToAdd: exp.targetGids } },
@@ -298,7 +366,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               startsAt: new Date().toISOString(),
               customerSelection: { all: true },
               customerGets: {
-                value: { percentage: Number(exp.discountPercent) / 100 },
+                value:
+                  exp.discountType === "FIXED_AMOUNT"
+                    ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
+                    : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
                 items: exp.targetType === "COLLECTION"
                   ? { collections: { collectionsToAdd: [exp.targetGid] } }
                   : { products: { productsToAdd: exp.targetGids } },

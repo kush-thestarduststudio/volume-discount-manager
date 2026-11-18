@@ -225,19 +225,38 @@
       {% if matched_product_volume_rule != nil %}
         {% for tier in matched_product_volume_rule.tiers %}
           {% assign min_qty = tier.minQuantity | default: 1 %}
-          {% assign disc_pct = tier.discountPercent | default: 0 %}
-          {% assign original_total = base_price | times: min_qty %}
-          {% assign discount_multiplier = 100 | minus: disc_pct %}
-          {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+          {% assign is_fixed_tier = false %}
+          {% if tier.discountType == 'FIXED_AMOUNT' %}
+            {% assign is_fixed_tier = true %}
+            {% assign tier_val = tier.discountValue | default: 100 %}
+            {% assign fixed_amt = tier_val | times: 100 %}
+            {% assign original_total = base_price | times: min_qty %}
+            {% assign discounted_total = original_total | minus: fixed_amt %}
+            {% if discounted_total < 0 %}{% assign discounted_total = 0 %}{% endif %}
+            {% assign disc_pct = 0 %}
+          {% else %}
+            {% assign tier_val = tier.discountPercent | default: tier.discountValue | default: 10 %}
+            {% assign disc_pct = tier_val %}
+            {% assign original_total = base_price | times: min_qty %}
+            {% assign discount_multiplier = 100 | minus: disc_pct %}
+            {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+          {% endif %}
           {% assign per_item = discounted_total | divided_by: min_qty %}
           {% assign card_counter = card_counter | plus: 1 %}
           {% assign qty_key = ',' | append: min_qty | append: ',' %}
           {% assign rendered_quantities = rendered_quantities | append: qty_key %}
 
+          {% assign clean_title = product.title | remove: 'Volume Tier:' | remove: 'Bundle for:' | strip %}
+          {% assign clean_slug = clean_title | slice: 0, 8 | upcase %}
+          {% assign tier_code = clean_slug | append: '-BUY' | append: min_qty | append: '-' | append: tier_val | append: 'OFF' %}
+
           <div
             class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
             data-min-qty="{{ min_qty }}"
+            data-discount-type="{{ tier.discountType | default: 'PERCENTAGE' }}"
+            data-discount-value="{{ tier_val }}"
             data-discount="{{ disc_pct }}"
+            data-code="{{ tier_code }}"
             data-label="{{ tier.label | default: '' }}"
           >
             {% if forloop.index == 2 and forloop.length > 2 %}
@@ -256,7 +275,9 @@
               <div class="bt-tier-info">
                 <span class="bt-tier-name">
                   Buy {{ min_qty }}
-                  {% if disc_pct > 0 %}
+                  {% if is_fixed_tier %}
+                    &middot; Save {{ fixed_amt | money }}
+                  {% elsif disc_pct > 0 %}
                     &middot; Save {{ disc_pct }}%
                   {% endif %}
                 </span>
@@ -266,7 +287,7 @@
 
             <div class="bt-tier-pricing">
               <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
-              {% if disc_pct > 0 %}
+              {% if is_fixed_tier or disc_pct > 0 %}
                 <span class="bt-tier-price-compare">{{ original_total | money }}</span>
               {% endif %}
             </div>
@@ -278,20 +299,38 @@
       {% if matched_collection_volume_rule != nil %}
         {% for tier in matched_collection_volume_rule.tiers %}
           {% assign min_qty = tier.minQuantity | default: 1 %}
-          {% assign disc_pct = tier.discountPercent | default: 0 %}
-          {% assign qty_key = ',' | append: min_qty | append: ',' %}
-
-          {% unless rendered_quantities contains qty_key %}
+          {% assign is_fixed_tier = false %}
+          {% if tier.discountType == 'FIXED_AMOUNT' %}
+            {% assign is_fixed_tier = true %}
+            {% assign tier_val = tier.discountValue | default: 100 %}
+            {% assign fixed_amt = tier_val | times: 100 %}
+            {% assign original_total = base_price | times: min_qty %}
+            {% assign discounted_total = original_total | minus: fixed_amt %}
+            {% if discounted_total < 0 %}{% assign discounted_total = 0 %}{% endif %}
+            {% assign disc_pct = 0 %}
+          {% else %}
+            {% assign tier_val = tier.discountPercent | default: tier.discountValue | default: 10 %}
+            {% assign disc_pct = tier_val %}
             {% assign original_total = base_price | times: min_qty %}
             {% assign discount_multiplier = 100 | minus: disc_pct %}
             {% assign discounted_total = original_total | times: discount_multiplier | divided_by: 100 %}
+          {% endif %}
+          {% assign qty_key = ',' | append: min_qty | append: ',' %}
+
+          {% unless rendered_quantities contains qty_key %}
             {% assign per_item = discounted_total | divided_by: min_qty %}
             {% assign card_counter = card_counter | plus: 1 %}
+
+            {% assign clean_col_slug = collection.title | slice: 0, 8 | upcase %}
+            {% assign tier_code = clean_col_slug | append: '-BUY' | append: min_qty | append: '-' | append: tier_val | append: 'OFF' %}
 
             <div
               class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
               data-min-qty="{{ min_qty }}"
+              data-discount-type="{{ tier.discountType | default: 'PERCENTAGE' }}"
+              data-discount-value="{{ tier_val }}"
               data-discount="{{ disc_pct }}"
+              data-code="{{ tier_code }}"
               data-label="{{ tier.label | default: '' }}"
             >
               <span class="bt-tier-badge">Best Value</span>
@@ -306,7 +345,9 @@
                 <div class="bt-tier-info">
                   <span class="bt-tier-name">
                     Buy {{ min_qty }}
-                    {% if disc_pct > 0 %}
+                    {% if is_fixed_tier %}
+                      &middot; Save {{ fixed_amt | money }}
+                    {% elsif disc_pct > 0 %}
                       &middot; Save {{ disc_pct }}%
                     {% endif %}
                   </span>
@@ -316,7 +357,7 @@
 
               <div class="bt-tier-pricing">
                 <span class="bt-tier-price-current">{{ discounted_total | money }}</span>
-                {% if disc_pct > 0 %}
+                {% if is_fixed_tier or disc_pct > 0 %}
                   <span class="bt-tier-price-compare">{{ original_total | money }}</span>
                 {% endif %}
               </div>

@@ -6,7 +6,7 @@
   const API_URL = "//volume-discount-manager.onrender.com/api/config";
   const ROOT = window.Shopify?.routes?.root || "/";
 
-  const fmt = (c) => "₹" + ((Number(c) || 0) / 100).toFixed(2);
+  const fmt = (c) => "₹" + ((Number(c) || 0) / 100).toFixed(0);
   const fmtPrice = (c) => {
     const v = Number(c) / 100;
     return v % 1 === 0 ? "₹" + v.toFixed(0) : "₹" + v.toFixed(2);
@@ -45,11 +45,15 @@
 
   let lastAppliedCode = null;
   function preapply(code) {
-    if (!code || code === lastAppliedCode) return;
+    if (code === lastAppliedCode) return;
     lastAppliedCode = code;
     try {
-      fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
-      document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
+      if (code) {
+        fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
+        document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
+      } else {
+        document.cookie = "discount_code=; path=/; max-age=0";
+      }
     } catch {}
   }
 
@@ -64,15 +68,18 @@
 
     let sel = cards.length ? {
       qty: parseInt(cards[0].dataset.minQty, 10) || 1,
-      disc: parseInt(cards[0].dataset.discount, 10) || 0,
+      type: cards[0].dataset.discountType || "PERCENTAGE",
+      val: parseFloat(cards[0].dataset.discountValue || cards[0].dataset.discount || "0") || 0,
       code: cards[0].dataset.code || "",
     } : null;
 
     function render() {
       if (!sel) return;
       syncQty(sel.qty);
-      btn && (btn.textContent = `Add ${sel.qty} to Cart` + (sel.disc ? ` (${sel.disc}% OFF)` : ""));
-      summary && (summary.textContent = sel.disc ? `Save ${sel.disc}% with this bundle!` : "");
+      const isFixed = sel.type === "FIXED_AMOUNT";
+      const off = sel.val ? (isFixed ? ` (₹${sel.val} OFF)` : ` (${sel.val}% OFF)`) : "";
+      btn && (btn.textContent = `Add ${sel.qty} to Cart` + off);
+      summary && (summary.textContent = sel.val ? `Save ${isFixed ? `₹${sel.val}` : `${sel.val}%`} with this offer!` : "");
     }
 
     cards.forEach((card) => {
@@ -83,7 +90,8 @@
         card.classList.add("is-selected");
         sel = {
           qty: parseInt(card.dataset.minQty, 10) || 1,
-          disc: parseInt(card.dataset.discount, 10) || 0,
+          type: card.dataset.discountType || "PERCENTAGE",
+          val: parseFloat(card.dataset.discountValue || card.dataset.discount || "0") || 0,
           code: card.dataset.code || "",
         };
         if (sel.code) preapply(sel.code);
@@ -132,6 +140,10 @@
 
     const basePrice = parseInt(wrap.dataset.basePrice || "0", 10);
     const baseDisc = parseInt(wrap.dataset.baseDiscount || "0", 10);
+    const discType = wrap.dataset.discountType || "PERCENTAGE";
+    const discVal = parseFloat(wrap.dataset.discountValue || "0") || (discType === "PERCENTAGE" ? (baseDisc || 10) : 100);
+    const isFixed = discType === "FIXED_AMOUNT";
+
     const cbs = $$(".bt-fbt-companion-checkbox", wrap);
     const btn = $(".bt-fbt-add-btn", wrap);
     const priceEl = $(".bt-fbt-bundle-price", wrap);
@@ -141,7 +153,7 @@
 
     function calc() {
       let orig = basePrice;
-      let total = baseDisc > 0 ? Math.round(basePrice * (100 - baseDisc) / 100) : basePrice;
+      let total = (!isFixed && baseDisc > 0) ? Math.round(basePrice * (100 - baseDisc) / 100) : basePrice;
       let count = 1;
 
       cbs.forEach((cb) => {
@@ -152,12 +164,18 @@
           const p = parseInt(cb.dataset.price || "0", 10);
           const d = parseInt(cb.dataset.discount || "0", 10);
           orig += p;
-          total += Math.round(p * (100 - d) / 100);
+          total += isFixed ? p : Math.round(p * (100 - (d || discVal)) / 100);
           if (thumb) thumb.style.opacity = "1";
         } else if (thumb) {
           thumb.style.opacity = "0.35";
         }
       });
+
+      if (isFixed && discVal > 0 && count > 1) {
+        total = Math.max(0, orig - Math.round(discVal * 100));
+      } else if (isFixed) {
+        total = orig;
+      }
 
       const save = orig - total;
       priceEl && (priceEl.textContent = fmt(total));
@@ -186,7 +204,7 @@
         btn.textContent = "Adding Bundle...";
         try {
           const bundleCode = wrap.dataset.code;
-          if (bundleCode) preapply(bundleCode);
+          if (bundleCode && items.length > 1) preapply(bundleCode);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -229,27 +247,48 @@
     for (const r of rules) {
       if (!r.active) continue;
       const tId = String(r.targetGid || "").replace(/\D/g, "");
+
       if (r.ruleType === "VOLUME" && r.tiers?.length) {
-        const items = cart.items.filter((it) => String(it.product_id) === tId);
+        const items = cart.items.filter((it) =>
+          r.targetType === "PRODUCT"
+            ? String(it.product_id) === tId
+            : (r.collectionProductIds || []).map(String).includes(String(it.product_id))
+        );
         const qty = items.reduce((s, it) => s + it.quantity, 0);
         const t = [...r.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => qty >= x.minQuantity);
         if (t) {
           const sub = items.reduce((s, it) => s + (it.original_line_price || it.price * it.quantity), 0);
-          disc += Math.round(sub * (t.discountPercent / 100));
-          if (!code) code = t.code || `${cleanCode(r.title)}-BUY${t.minQuantity}-${t.discountPercent}OFF`;
+          const isFixed = t.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue));
+          disc += isFixed ? Math.round(val * 100) : Math.round(sub * (val / 100));
+          if (!code) code = t.code || `${cleanCode(r.title)}-BUY${t.minQuantity}-${val}OFF`;
         }
       } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
         const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
-        if (cart.items.some((it) => String(it.product_id) === tId) && cIds.some((id) => cart.items.some((it) => String(it.product_id) === id))) {
-          const bp = Number(r.mainDiscountPercent || 0);
-          cart.items.forEach((it) => {
-            const pid = String(it.product_id);
-            const orig = it.original_line_price || it.price * it.quantity;
-            if (pid === tId && bp > 0) disc += Math.round(orig * (bp / 100));
-            const comp = r.fbtProducts.find((cp) => String(cp.productId).replace(/\D/g, "") === pid);
-            if (comp) disc += Math.round(orig * (Number(comp.discountPercent || bp || 10) / 100));
-          });
-          if (!code) code = r.discountCode || `BUNDLE-${cleanCode(r.title)}-${bp || Number(r.fbtProducts[0]?.discountPercent || 10)}OFF`;
+        const targetItem = cart.items.find((it) => String(it.product_id) === tId);
+        const hasAllCompanions = cIds.every((id) => cart.items.some((it) => String(it.product_id) === id));
+
+        if (targetItem && hasAllCompanions) {
+          const companionItems = cIds.map((id) => cart.items.find((it) => String(it.product_id) === id));
+          const bundleCount = Math.min(targetItem.quantity, ...companionItems.map((it) => it?.quantity || 1));
+          const isFixed = r.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
+
+          if (isFixed) {
+            disc += Math.round(bundleCount * val * 100);
+          } else {
+            const bp = Number(r.mainDiscountPercent || val || 0);
+            const targetUnit = Math.round((targetItem.original_line_price || targetItem.price * targetItem.quantity) / targetItem.quantity);
+            if (bp > 0) disc += Math.round(targetUnit * bundleCount * (bp / 100));
+
+            companionItems.forEach((it, idx) => {
+              if (!it) return;
+              const cp = Number(r.fbtProducts[idx]?.discountPercent || bp || 10);
+              const unit = Math.round((it.original_line_price || it.price * it.quantity) / it.quantity);
+              disc += Math.round(unit * bundleCount * (cp / 100));
+            });
+          }
+          if (!code) code = r.discountCode || `BUNDLE-${cleanCode(r.title)}-${val}OFF`;
         }
       }
     }
@@ -292,9 +331,7 @@
     });
   }
 
-  let activePriceStr = null;
-  let activeOrigStr = null;
-  let timer = null;
+  let activePriceStr = null, activeOrigStr = null, timer = null;
 
   function setDrawerPrice(pStr, origStr) {
     activePriceStr = pStr;
@@ -348,6 +385,7 @@
         preapply(code);
       } else {
         window.__btActiveCode = null;
+        preapply(null);
       }
 
       if (finalTotal < origTotal) {
@@ -364,31 +402,8 @@
   // 6. PDP HYDRATION
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
-
     $$(".bt-volume-widget").forEach(initVolume);
     $$(".bt-fbt-widget").forEach(initFbt);
-
-    if ($(".bt-volume-widget") && $(".bt-fbt-widget")) return;
-
-    const rules = await getRules();
-    if (!rules.length) return;
-
-    const wrap = $(".bt-dual-widget-wrap");
-    const pId = wrap?.dataset.productId || window.meta?.product?.id || "";
-    if (!pId) return;
-    const pIdStr = String(pId);
-
-    if (!$(".bt-volume-widget")) {
-      const r = rules.find((x) => x.active && x.ruleType === "VOLUME" && x.tiers?.length && (x.targetType === "PRODUCT" ? String(x.targetGid || "").includes(pIdStr) : (x.collectionProductIds || []).map(String).includes(pIdStr)));
-      if (r?.tiers?.length) {
-        const el = document.createElement("div");
-        el.className = "bt-widget-container bt-volume-widget";
-        el.dataset.variantId = $('[name="id"]')?.value || "";
-        el.innerHTML = `<h3 class="bt-widget-title">Buy More, Save More</h3><div class="bt-tiers-list">${r.tiers.map((t, i) => `<div class="bt-tier-card${i ? "" : " is-selected"}" data-min-qty="${t.minQuantity}" data-discount="${t.discountPercent}" data-code="${t.code || ""}"><input type="radio" class="bt-tier-radio"${i ? "" : " checked"}><div class="bt-tier-info"><span>Buy ${t.minQuantity} · Save ${t.discountPercent}%</span></div></div>`).join("")}</div><button type="button" class="bt-add-btn">Add To Cart</button>`;
-        initVolume(el);
-        (wrap || $('form[action*="/cart/add"]') || $(".product-form"))?.appendChild(el);
-      }
-    }
   }
 
   // 7. OBSERVER & INTERCEPTOR
