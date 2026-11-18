@@ -10,21 +10,7 @@
   const $ = (sel, el = document) => el.querySelector(sel);
   const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
 
-  function getRoots() {
-    const roots = [document];
-    try {
-      $$("*").forEach((el) => {
-        if (el.shadowRoot && !roots.includes(el.shadowRoot)) roots.push(el.shadowRoot);
-      });
-      $$("iframe").forEach((frame) => {
-        try {
-          if (frame.contentDocument && !roots.includes(frame.contentDocument)) roots.push(frame.contentDocument);
-        } catch {}
-      });
-    } catch {}
-    return roots;
-  }
-
+  // Trigger standard storefront cart refresh so drawers update naturally without modifying their DOM
   function triggerRefresh() {
     ["cart:refresh", "cart:updated", "cart:build"].forEach((name) => {
       const evt = new CustomEvent(name, { bubbles: true });
@@ -59,6 +45,14 @@
     }
   }
 
+  // Pre-apply discount to session (just like Selleasy) so checkout picks it up automatically
+  function preapplyDiscount(code) {
+    if (!code) return;
+    try {
+      fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
+    } catch {}
+  }
+
   // 1. VOLUME WIDGET
   function initVolume(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
@@ -71,6 +65,7 @@
     let sel = cards.length ? {
       qty: parseInt(cards[0].dataset.minQty, 10) || 1,
       disc: parseInt(cards[0].dataset.discount, 10) || 0,
+      code: cards[0].dataset.code || "",
     } : null;
 
     function render() {
@@ -89,6 +84,7 @@
         sel = {
           qty: parseInt(card.dataset.minQty, 10) || 1,
           disc: parseInt(card.dataset.discount, 10) || 0,
+          code: card.dataset.code || "",
         };
         render();
       });
@@ -106,6 +102,7 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
+          if (sel?.code) preapplyDiscount(sel.code);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -114,7 +111,6 @@
           if (!res.ok) throw new Error();
           btn.textContent = "✓ Added!";
           triggerRefresh();
-          setTimeout(updateBadges, 400);
           setTimeout(() => { btn.disabled = false; render(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -186,6 +182,8 @@
         btn.disabled = true;
         btn.textContent = "Adding Bundle...";
         try {
+          const bundleCode = wrap.dataset.code;
+          if (bundleCode) preapplyDiscount(bundleCode);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -194,7 +192,6 @@
           if (!res.ok) throw new Error();
           btn.textContent = "✓ Added Bundle!";
           triggerRefresh();
-          setTimeout(updateBadges, 400);
           setTimeout(() => { btn.disabled = false; calc(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -252,7 +249,7 @@
           let h = "";
           sorted.forEach((t, i) => {
             const q = t.minQuantity || 1, d = t.discountPercent || 0, orig = price * q, disc = Math.round(orig * (100 - d) / 100);
-            h += `<div class="bt-tier-card ${i === 0 ? "is-selected" : ""}" data-min-qty="${q}" data-discount="${d}">
+            h += `<div class="bt-tier-card ${i === 0 ? "is-selected" : ""}" data-min-qty="${q}" data-discount="${d}" data-code="${t.code || ""}">
               <input type="radio" class="bt-tier-radio" ${i === 0 ? "checked" : ""}>
               <div class="bt-tier-info"><span class="bt-tier-name">Buy ${q} &middot; Save ${d}%</span><span class="bt-tier-per-item">${fmt(Math.round(disc / q))}/each</span></div>
               <div class="bt-tier-pricing"><span class="bt-tier-price-current">${fmt(disc)}</span><span class="bt-tier-price-compare">${fmt(orig)}</span></div>
@@ -293,6 +290,7 @@
         el.dataset.baseVariantId = String(vId);
         el.dataset.basePrice = String(price);
         el.dataset.baseDiscount = String(bDisc);
+        el.dataset.code = fbt.discountCode || "";
         el.innerHTML = `<div class="bt-widget-header"><h3 class="bt-widget-title">Frequently Bought Together</h3><p class="bt-widget-subtitle">Bundle these items together and save</p></div><div class="bt-fbt-gallery">${gHtml}</div><div class="bt-fbt-list">${lHtml}</div><div class="bt-fbt-summary-wrap"><div class="bt-fbt-total-box"><div class="bt-fbt-total-label">Bundle Price:</div><div class="bt-fbt-pricing"><span class="bt-fbt-bundle-price"></span><span class="bt-fbt-bundle-compare"></span></div></div><button type="button" class="bt-fbt-add-btn">Add Bundle To Cart</button><div class="bt-fbt-savings-note"></div></div>`;
         initFbt(el);
         if (wrap) wrap.appendChild(el);
@@ -304,45 +302,10 @@
     }
   }
 
-  // 5. CART DRAWER BADGES ONLY (SHIPROCKET FOOTER LEFT 100% UNTOUCHED!)
-  let updating = false;
-  async function updateBadges() {
-    if (updating) return;
-    updating = true;
-    try {
-      const res = await fetch(ROOT + "cart.js?_bt=1");
-      if (!res.ok) throw new Error();
-      const cart = await res.json();
-      if (!cart || !Array.isArray(cart.items)) return;
-
-      getRoots().forEach((root) => {
-        cart.items.forEach((item) => {
-          const itemEls = $$('.mini-cart-item, [id*="sr-cart-item-"], [class*="cart-item"]', root);
-          itemEls.forEach((el) => {
-            const txt = (el.textContent || "").toLowerCase();
-            const t = (item.title || "").toLowerCase();
-            if ((txt.includes(t) || txt.includes("test")) && !el.querySelector(".bt-sr-badge")) {
-              const b = document.createElement("div");
-              b.className = "bt-sr-badge";
-              b.textContent = "✓ Tier Discount Applied";
-              b.style.cssText = "background:#e6f4ea;color:#137333;font-size:11px;font-weight:700;padding:2px 6px;border-radius:4px;display:inline-block;margin:4px 0;";
-              const titleEl = $(".mini-cart-item-title, [class*='title'], h4, h3, p", el) || el;
-              titleEl?.parentNode?.insertBefore(b, titleEl.nextSibling);
-            }
-          });
-        });
-      });
-    } catch {}
-    setTimeout(() => { updating = false; }, 800);
-  }
-
   function start() {
     hydratePdp();
-    setTimeout(updateBadges, 1000);
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
   document.addEventListener("shopify:section:load", start);
-  window.addEventListener("cart:refresh", () => setTimeout(updateBadges, 300));
-  window.addEventListener("cart:updated", () => setTimeout(updateBadges, 300));
 })();

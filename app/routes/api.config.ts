@@ -89,6 +89,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       const isFbt = r.targetType === "PRODUCT" && fbtProducts.length > 0 && tiers.length === 0;
 
+      const cleanName = r.title
+        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toUpperCase()
+        .slice(0, 8) || (isFbt ? "BUNDLE" : "OFFER");
+
+      const bundleDiscountPct = mainDiscountPercent > 0 ? mainDiscountPercent : (fbtProducts[0]?.discountPercent || 10);
+      const discountCode = isFbt ? `BUNDLE-${cleanName}-${bundleDiscountPct}OFF` : "";
+
+      const enhancedTiers = tiers.map((t: any) => ({
+        ...t,
+        code: `${cleanName}-BUY${t.minQuantity}-${t.discountPercent}OFF`,
+      }));
+
       return {
         id: r.id,
         title: r.title,
@@ -96,7 +110,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         targetGid: r.targetGid,
         ruleType: isFbt ? "FBT" : "VOLUME",
         mainDiscountPercent,
-        tiers,
+        discountCode,
+        tiers: enhancedTiers,
         fbtProducts,
         active: r.active,
       };

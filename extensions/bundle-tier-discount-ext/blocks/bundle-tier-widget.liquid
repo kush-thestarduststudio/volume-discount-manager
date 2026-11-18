@@ -109,10 +109,15 @@
             {% assign qty_key = ',' | append: min_qty | append: ',' %}
             {% assign rendered_quantities = rendered_quantities | append: qty_key %}
 
+            {% assign clean_title = product.title | remove: 'Volume Tier:' | remove: 'Bundle for:' | strip %}
+            {% assign clean_slug = clean_title | slice: 0, 8 | upcase %}
+            {% assign tier_code = clean_slug | append: '-BUY' | append: min_qty | append: '-' | append: disc_pct | append: 'OFF' %}
+
             <div
               class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
               data-min-qty="{{ min_qty }}"
               data-discount="{{ disc_pct }}"
+              data-code="{{ tier_code }}"
               data-label="{{ tier.label | default: '' }}"
             >
               {% if forloop.index == 2 and forloop.length > 2 %}
@@ -162,10 +167,13 @@
               {% assign per_item = discounted_total | divided_by: min_qty %}
               {% assign card_counter = card_counter | plus: 1 %}
 
+              {% assign clean_col_slug = collection.title | slice: 0, 8 | upcase %}
+              {% assign tier_code = clean_col_slug | append: '-BUY' | append: min_qty | append: '-' | append: disc_pct | append: 'OFF' %}
               <div
                 class="bt-tier-card {% if card_counter == 1 %}is-selected{% endif %}"
                 data-min-qty="{{ min_qty }}"
                 data-discount="{{ disc_pct }}"
+                data-code="{{ tier_code }}"
                 data-label="{{ tier.label | default: '' }}"
               >
                 <span class="bt-tier-badge">Best Value</span>
@@ -276,6 +284,14 @@
     {% assign initial_savings = initial_bundle_original | minus: initial_bundle_total %}
     {% assign total_items_count = matched_fbt_rule.fbtProducts.size | plus: 1 %}
 
+    {% assign fbt_first_disc = matched_fbt_rule.fbtProducts[0].discountPercent | default: 10 %}
+    {% assign bundle_disc = main_disc_pct %}
+    {% if bundle_disc == 0 or bundle_disc == blank %}
+      {% assign bundle_disc = fbt_first_disc %}
+    {% endif %}
+    {% assign clean_fbt_slug = product.title | remove: 'Volume Tier:' | remove: 'Bundle for:' | strip | slice: 0, 8 | upcase %}
+    {% assign bundle_code = 'BUNDLE-' | append: clean_fbt_slug | append: '-' | append: bundle_disc | append: 'OFF' %}
+
     <div
       class="bt-widget-container bt-fbt-widget"
       id="bt-fbt-widget-{{ block.id }}"
@@ -283,6 +299,7 @@
       data-base-price="{{ base_price }}"
       data-base-discount="{{ main_disc_pct }}"
       data-base-title="{{ product.title | escape }}"
+      data-code="{{ bundle_code }}"
       style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
     >
       <div class="bt-widget-header">

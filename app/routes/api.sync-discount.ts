@@ -125,10 +125,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       );
     }
 
-    // 3. Fetch existing automatic discount nodes
+    // 3. Fetch existing discount nodes (both automatic and code)
     const discountData = await graphql(`
       query {
-        discountNodes(first: 50) {
+        discountNodes(first: 100) {
           nodes {
             id
             discount {
@@ -137,9 +137,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 title
                 status
               }
-              ... on DiscountAutomaticApp {
+              ... on DiscountCodeBasic {
                 title
                 status
+                codes(first: 5) {
+                  nodes {
+                    code
+                  }
+                }
               }
             }
           }
@@ -148,100 +153,168 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     `);
 
     const allNodes = discountData?.data?.discountNodes?.nodes || [];
-    const existingAppDiscounts = allNodes.filter(
-      (n: any) =>
-        (n.discount?.__typename === "DiscountAutomaticBasic" || n.discount?.__typename === "DiscountAutomaticApp") &&
-        (n.discount?.title?.startsWith("[Volume]") || n.discount?.title?.includes("Bundle & Tier"))
-    );
+    const existingAppDiscounts = allNodes.filter((n: any) => {
+      const title = n.discount?.title || "";
+      return title.startsWith("[Volume") || title.startsWith("[Bundle") || title.includes("Bundle & Tier");
+    });
 
-    // Build expected discounts from currently active volume rules
+    // Build expected discounts from active volume and FBT rules
     const expectedDiscounts: any[] = [];
     for (const rule of activeRulesPayload) {
+      const cleanName = rule.title
+        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toUpperCase()
+        .slice(0, 8) || "OFFER";
+
       if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
         for (const tier of rule.tiers) {
           if (tier.minQuantity > 0 && tier.discountPercent > 0) {
             expectedDiscounts.push({
-              title: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
+              type: "VOLUME",
+              autoTitle: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
+              codeTitle: `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
+              code: `${cleanName}-BUY${tier.minQuantity}-${tier.discountPercent}OFF`,
               minQuantity: tier.minQuantity,
               discountPercent: tier.discountPercent,
               targetType: rule.targetType,
               targetGid: rule.targetGid,
+              targetGids: [rule.targetGid],
             });
           }
         }
+      } else if (rule.ruleType === "FBT" && Array.isArray(rule.fbtProducts) && rule.fbtProducts.length > 0) {
+        const companionGids = rule.fbtProducts
+          .map((p: any) => (p.productId?.startsWith("gid://") ? p.productId : "gid://shopify/Product/" + p.productId))
+          .filter(Boolean);
+        const allBundleGids = [rule.targetGid, ...companionGids];
+        const bundleDiscountPct =
+          Number(rule.mainDiscountPercent) > 0
+            ? Number(rule.mainDiscountPercent)
+            : Number(rule.fbtProducts[0]?.discountPercent) || 10;
+
+        expectedDiscounts.push({
+          type: "FBT",
+          autoTitle: `[Bundle] ${rule.title} (${bundleDiscountPct}% OFF)`,
+          codeTitle: `[Bundle Code] ${rule.title} (${bundleDiscountPct}% OFF)`,
+          code: `BUNDLE-${cleanName}-${bundleDiscountPct}OFF`,
+          minQuantity: allBundleGids.length,
+          discountPercent: bundleDiscountPct,
+          targetType: "PRODUCT",
+          targetGid: rule.targetGid,
+          targetGids: allBundleGids,
+        });
       }
     }
 
     // Delete outdated discounts
     const deleteResults: any[] = [];
     for (const oldNode of existingAppDiscounts) {
-      const stillNeeded = expectedDiscounts.some(
-        (exp) => exp.title === oldNode.discount?.title && oldNode.discount?.__typename === "DiscountAutomaticBasic"
+      const title = oldNode.discount?.title || "";
+      const isCode = oldNode.discount?.__typename === "DiscountCodeBasic";
+
+      const stillNeeded = expectedDiscounts.some((exp) =>
+        isCode ? exp.codeTitle === title : exp.autoTitle === title
       );
       if (!stillNeeded) {
-        const delRes = await graphql(
-          `mutation DeleteDiscount($id: ID!) {
-            discountAutomaticDelete(id: $id) {
-              userErrors { field message }
-            }
-          }`,
-          { id: oldNode.id }
-        );
-        deleteResults.push({ id: oldNode.id, title: oldNode.discount?.title, res: delRes });
+        if (isCode) {
+          const delRes = await graphql(
+            `mutation DeleteCodeDiscount($id: ID!) {
+              discountCodeDelete(id: $id) { userErrors { field message } }
+            }`,
+            { id: oldNode.id }
+          );
+          deleteResults.push({ id: oldNode.id, title, res: delRes });
+        } else {
+          const delRes = await graphql(
+            `mutation DeleteDiscount($id: ID!) {
+              discountAutomaticDelete(id: $id) { userErrors { field message } }
+            }`,
+            { id: oldNode.id }
+          );
+          deleteResults.push({ id: oldNode.id, title, res: delRes });
+        }
       }
     }
 
-    // Create missing native automatic discounts
+    // Create missing automatic discounts and code discounts
     const createResults: any[] = [];
     for (const exp of expectedDiscounts) {
-      const alreadyExists = existingAppDiscounts.some(
-        (n: any) => n.discount?.title === exp.title && n.discount?.__typename === "DiscountAutomaticBasic"
+      // 1. Automatic Discount
+      const autoExists = existingAppDiscounts.some(
+        (n: any) => n.discount?.title === exp.autoTitle && n.discount?.__typename === "DiscountAutomaticBasic"
       );
-      if (!alreadyExists) {
+      if (!autoExists) {
         const createRes = await graphql(
           `mutation CreateNativeAutomaticDiscount($input: DiscountAutomaticBasicInput!) {
             discountAutomaticBasicCreate(automaticBasicDiscount: $input) {
-              automaticDiscountNode {
-                id
-                automaticDiscount {
-                  ... on DiscountAutomaticBasic {
-                    title
-                    status
-                  }
-                }
-              }
-              userErrors {
-                field
-                message
-              }
+              automaticDiscountNode { id }
+              userErrors { field message }
             }
           }`,
           {
             input: {
-              title: exp.title,
+              title: exp.autoTitle,
               startsAt: new Date().toISOString(),
               customerGets: {
-                value: {
-                  percentage: Number(exp.discountPercent) / 100,
-                },
+                value: { percentage: Number(exp.discountPercent) / 100 },
                 items: exp.targetType === "COLLECTION"
                   ? { collections: { collectionsToAdd: [exp.targetGid] } }
-                  : { products: { productsToAdd: [exp.targetGid] } },
+                  : { products: { productsToAdd: exp.targetGids } },
               },
               minimumRequirement: {
-                quantity: {
-                  greaterThanOrEqualToQuantity: String(exp.minQuantity),
-                },
+                quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
               },
               combinesWith: {
                 orderDiscounts: true,
-                productDiscounts: false,
+                productDiscounts: true,
                 shippingDiscounts: true,
               },
             },
           }
         );
-        createResults.push({ title: exp.title, result: createRes });
+        createResults.push({ title: exp.autoTitle, result: createRes });
+      }
+
+      // 2. Code Discount
+      const codeExists = existingAppDiscounts.some((n: any) => {
+        if (n.discount?.__typename !== "DiscountCodeBasic") return false;
+        if (n.discount?.title === exp.codeTitle) return true;
+        const codes = (n.discount?.codes?.nodes || []).map((c: any) => c.code);
+        return codes.includes(exp.code);
+      });
+      if (!codeExists) {
+        const createCodeRes = await graphql(
+          `mutation CreateNativeCodeDiscount($input: DiscountCodeBasicInput!) {
+            discountCodeBasicCreate(basicCodeDiscount: $input) {
+              codeDiscountNode { id }
+              userErrors { field message }
+            }
+          }`,
+          {
+            input: {
+              title: exp.codeTitle,
+              code: exp.code,
+              startsAt: new Date().toISOString(),
+              customerSelection: { all: true },
+              customerGets: {
+                value: { percentage: Number(exp.discountPercent) / 100 },
+                items: exp.targetType === "COLLECTION"
+                  ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                  : { products: { productsToAdd: exp.targetGids } },
+              },
+              minimumRequirement: {
+                quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
+              },
+              combinesWith: {
+                orderDiscounts: true,
+                productDiscounts: true,
+                shippingDiscounts: true,
+              },
+            },
+          }
+        );
+        createResults.push({ title: exp.codeTitle, code: exp.code, result: createCodeRes });
       }
     }
 
