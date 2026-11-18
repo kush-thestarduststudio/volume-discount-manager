@@ -34,7 +34,7 @@
     inp && (inp.value = String(qty), inp.dispatchEvent(new Event("change", { bubbles: true })));
   }
 
-  // 1. APPLY DISCOUNT DIRECTLY TO SHOPIFY CART (EXACTLY LIKE SELLEASY)
+  // 1. APPLY DISCOUNT DIRECTLY TO SHOPIFY CART (SELLEASY APPROACH)
   let lastAppliedCode = null;
   let isApplyingDiscount = false;
 
@@ -44,14 +44,12 @@
     lastAppliedCode = code;
 
     try {
-      // Send discount directly to Shopify Cart via Ajax Cart API
       await fetch(ROOT + "cart/update.js", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ discount: code || "" }),
       });
 
-      // Also set checkout discount session and cookies for Fastrr / Shiprocket 1-click checkout
       if (code) {
         fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
         document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
@@ -72,7 +70,6 @@
         try { localStorage.removeItem("discount_code"); } catch {}
       }
 
-      // Notify cart listeners so Shiprocket Cart Drawer refreshes with native discounted totals
       triggerRefresh();
     } catch (e) {
       console.error("[BundleTier] Error updating cart discount:", e);
@@ -81,7 +78,81 @@
     }
   }
 
-  // 2. VOLUME WIDGET INITIALIZATION
+  // 2. ESTIMATED TOTAL STRIKETHROUGH & FINAL PRICE IN SHIPROCKET DRAWER
+  let activeFinalCents = 0;
+  let activeOrigCents = 0;
+  let totalTimer = null;
+
+  function updateEstimatedTotal(finalCents, origCents) {
+    if (!finalCents || !origCents || finalCents >= origCents) return;
+    const finalStr = fmtPrice(finalCents);
+    const origStr = fmtPrice(origCents);
+
+    // 1. Direct update to Shiprocket Smart Cart designated elements
+    const origEls = $$(".summary-original-price, [class*='summary-original-price']");
+    const totalEls = $$(".total-price, [class*='total-price']");
+
+    let updated = false;
+    totalEls.forEach((el) => {
+      if (el.closest(".sr-smart-cart-total, .sr-cart-buy-section, .sr-cart-total-price-amount, [class*='smart-cart']")) {
+        el.textContent = finalStr;
+        updated = true;
+      }
+    });
+
+    origEls.forEach((el) => {
+      el.textContent = origStr;
+      el.style.display = "inline-block";
+      el.style.textDecoration = "line-through";
+      el.style.marginRight = "6px";
+      updated = true;
+    });
+
+    // 2. Generic fallback: check any label with "Estimated Total"
+    $$("*").forEach((lbl) => {
+      if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
+        const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
+        if (container) {
+          const priceEls = Array.from(container.querySelectorAll("*")).filter(
+            (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
+          );
+          if (priceEls.length === 1 && priceEls[0].textContent !== finalStr) {
+            priceEls[0].innerHTML = `<s style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span>${finalStr}</span>`;
+          } else if (priceEls.length >= 2) {
+            priceEls[0].textContent = origStr;
+            priceEls[0].style.display = "inline-block";
+            priceEls[priceEls.length - 1].textContent = finalStr;
+          }
+        }
+      }
+    });
+  }
+
+  function setDrawerEstimatedTotal(finalCents, origCents) {
+    activeFinalCents = finalCents;
+    activeOrigCents = origCents;
+    if (!finalCents || !origCents || finalCents >= origCents) return;
+
+    updateEstimatedTotal(finalCents, origCents);
+    if (totalTimer) clearInterval(totalTimer);
+    let ticks = 0;
+    totalTimer = setInterval(() => {
+      if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
+        updateEstimatedTotal(activeFinalCents, activeOrigCents);
+      }
+      ticks++;
+      if (ticks > 40) clearInterval(totalTimer);
+    }, 150);
+  }
+
+  function clearDrawerEstimatedTotal() {
+    activeFinalCents = 0;
+    activeOrigCents = 0;
+    if (totalTimer) clearInterval(totalTimer);
+    $$(".summary-original-price").forEach((el) => (el.style.display = "none"));
+  }
+
+  // 3. VOLUME WIDGET INITIALIZATION
   function initVolume(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -141,7 +212,6 @@
           });
           if (!res.ok) throw new Error();
 
-          // Apply discount directly in cart (like Selleasy)
           if (sel?.code) {
             await applyCartDiscount(sel.code);
           }
@@ -158,7 +228,7 @@
     render();
   }
 
-  // 3. FBT WIDGET INITIALIZATION
+  // 4. FBT WIDGET INITIALIZATION
   function initFbt(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -252,7 +322,7 @@
     calc();
   }
 
-  // 4. FETCH CONFIG & RULES
+  // 5. FETCH CONFIG & RULES
   let configCache = null;
   async function getConfig() {
     if (configCache) return configCache;
@@ -272,7 +342,7 @@
     return Array.isArray(cfg?.rules) ? cfg.rules : [];
   }
 
-  // 5. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
+  // 6. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
   const cleanCode = (t) =>
     (t || "")
       .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
@@ -343,7 +413,7 @@
     return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
-  // 6. SYNC CART DISCOUNT (EVALUATES CART AND APPLIES/CLEARS DISCOUNT DIRECTLY IN SHOPIFY CART)
+  // 7. SYNC CART DISCOUNT & ESTIMATED TOTAL
   let syncLock = false;
   async function syncCartDiscount() {
     if (syncLock) return;
@@ -355,11 +425,31 @@
 
       if (!cart?.items?.length) {
         if (lastAppliedCode) await applyCartDiscount("");
+        clearDrawerEstimatedTotal();
         return;
       }
 
+      let origTotal = cart.original_total_price || cart.total_price;
+      let finalTotal = cart.total_price;
+      let lineFinal = 0, lineOrig = 0;
+
+      cart.items.forEach((item) => {
+        const o = item.original_line_price ?? (item.original_price * item.quantity);
+        const f = item.final_line_price ?? (item.final_price ? item.final_price * item.quantity : o);
+        lineOrig += o;
+        lineFinal += f;
+      });
+
+      if (lineOrig > origTotal) origTotal = lineOrig;
+      if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
+
       const rules = await getRules();
       const { disc, code } = getActiveDiscount(cart, rules);
+
+      if (disc > 0) {
+        const ruleFinal = Math.max(0, origTotal - disc);
+        if (ruleFinal < finalTotal) finalTotal = ruleFinal;
+      }
 
       if (code && disc > 0) {
         if (code !== lastAppliedCode) {
@@ -368,12 +458,18 @@
       } else if (lastAppliedCode) {
         await applyCartDiscount("");
       }
+
+      if (finalTotal < origTotal) {
+        setDrawerEstimatedTotal(finalTotal, origTotal);
+      } else {
+        clearDrawerEstimatedTotal();
+      }
     } catch {} finally {
       syncLock = false;
     }
   }
 
-  // 7. PDP HYDRATION & DYNAMIC INJECTION
+  // 8. PDP HYDRATION & DYNAMIC INJECTION
   let pdpInjected = false;
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
@@ -599,7 +695,18 @@
     } catch {}
   }
 
-  // 8. INTERCEPT CART FETCHES TO KEEP CART DISCOUNT ALWAYS IN SYNC
+  // 9. OBSERVER & INTERCEPTOR
+  let obsTimer = null;
+  const observer = new MutationObserver(() => {
+    if (!activeFinalCents || obsTimer) return;
+    obsTimer = setTimeout(() => {
+      obsTimer = null;
+      if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
+        updateEstimatedTotal(activeFinalCents, activeOrigCents);
+      }
+    }, 80);
+  });
+
   const _fetch = window.fetch;
   window.fetch = function(...args) {
     const res = _fetch.apply(this, args);
@@ -612,7 +719,6 @@
     return res;
   };
 
-  // 9. ON CHECKOUT CLICK, ENSURE FASTTR/CHECKOUT HAS DISCOUNT PRE-APPLIED
   document.addEventListener("click", (e) => {
     const btn = e.target.closest("button, a, [role='button']");
     if (!btn) return;
@@ -636,6 +742,7 @@
   function start() {
     hydratePdp();
     setTimeout(syncCartDiscount, 500);
+    try { observer.observe(document.body, { childList: true, subtree: true }); } catch {}
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
