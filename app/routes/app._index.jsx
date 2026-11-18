@@ -279,18 +279,6 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       }
     }
 
-    // Attach clean discount code to each tier for 3rd-party checkout (Shiprocket/Fastrr) compatibility
-    for (const rule of activeRulesPayload) {
-      if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers)) {
-        const slug = (rule.title || "TIER").replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(-6) || "TIER";
-        for (const tier of rule.tiers) {
-          if (tier.discountPercent > 0) {
-            tier.code = `VOL${tier.discountPercent}-${slug}`;
-          }
-        }
-      }
-    }
-
     const collectionIds = activeRulesPayload
       .filter((r) => r.targetType === "COLLECTION" && r.targetGid)
       .map((r) => r.targetGid);
@@ -357,7 +345,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       }
     }
 
-    // 2. Sync Native Shopify Automatic Discounts AND Matching Fastrr/Shiprocket Discount Codes
+    // 2. Sync Native Shopify Automatic Discounts (Only 1 automatic discount per volume tier)
     try {
       const discountRes = await admin.graphql(`
         query GetDiscounts {
@@ -373,11 +361,6 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                 ... on DiscountCodeBasic {
                   title
                   status
-                  codes(first: 5) {
-                    nodes {
-                      code
-                    }
-                  }
                 }
                 ... on DiscountAutomaticApp {
                   title
@@ -391,12 +374,12 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       const discountJson = await discountRes.json();
       const allNodes = discountJson?.data?.discountNodes?.nodes || [];
 
-      // Find all existing [Volume] discount nodes
+      // Find all existing [Volume] discount nodes (both automatic and code-based)
       const existingAppDiscounts = allNodes.filter(
         (n) => n.discount?.title?.startsWith("[Volume]") || n.discount?.title?.includes("Bundle & Tier")
       );
 
-      // Build expected discounts from currently active volume rules
+      // Build expected automatic discounts from currently active volume rules
       const expectedDiscounts = [];
       for (const rule of activeRulesPayload) {
         if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
@@ -404,8 +387,6 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
             if (tier.minQuantity > 0 && tier.discountPercent > 0) {
               expectedDiscounts.push({
                 autoTitle: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
-                codeTitle: `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
-                code: tier.code,
                 minQuantity: tier.minQuantity,
                 discountPercent: tier.discountPercent,
                 targetType: rule.targetType,
@@ -416,41 +397,45 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         }
       }
 
-      // Delete outdated discounts
+      // Delete any code discounts or outdated automatic discounts
       for (const oldNode of existingAppDiscounts) {
         const title = oldNode.discount?.title || "";
+
+        // Delete any code discounts (merchant only wants pure Automatic Discounts)
+        if (oldNode.discount?.__typename === "DiscountCodeBasic") {
+          console.log(`[CleanSync] Deleting code discount (only automatic discount allowed): ${title}`);
+          await admin.graphql(
+            `mutation DeleteCodeDiscount($id: ID!) {
+              discountCodeDelete(id: $id) {
+                userErrors { field message }
+              }
+            }`,
+            { variables: { id: oldNode.id } }
+          );
+          continue;
+        }
+
+        // For automatic discounts, delete if not in expected list
         const isNeeded = expectedDiscounts.some(
-          (exp) => exp.autoTitle === title || exp.codeTitle === title
+          (exp) => exp.autoTitle === title && oldNode.discount?.__typename === "DiscountAutomaticBasic"
         );
         if (!isNeeded) {
-          console.log(`[Sync] Removing outdated discount: ${title}`);
-          if (oldNode.discount?.__typename === "DiscountCodeBasic") {
-            await admin.graphql(
-              `mutation DeleteCodeDiscount($id: ID!) {
-                discountCodeDelete(id: $id) {
-                  userErrors { field message }
-                }
-              }`,
-              { variables: { id: oldNode.id } }
-            );
-          } else {
-            await admin.graphql(
-              `mutation DeleteAutoDiscount($id: ID!) {
-                discountAutomaticDelete(id: $id) {
-                  userErrors { field message }
-                }
-              }`,
-              { variables: { id: oldNode.id } }
-            );
-          }
+          console.log(`[Sync] Removing outdated automatic discount: ${title}`);
+          await admin.graphql(
+            `mutation DeleteAutoDiscount($id: ID!) {
+              discountAutomaticDelete(id: $id) {
+                userErrors { field message }
+              }
+            }`,
+            { variables: { id: oldNode.id } }
+          );
         }
       }
 
-      // Create expected discounts that don't already exist
+      // Create expected automatic discounts that don't already exist
       let activeCount = 0;
       let lastErrorMessage = "";
       for (const exp of expectedDiscounts) {
-        // 1. Create Native Automatic Discount (for Shopify Native Checkout & Cart)
         const autoExists = existingAppDiscounts.some(
           (n) => n.discount?.__typename === "DiscountAutomaticBasic" && n.discount?.title === exp.autoTitle
         );
@@ -501,57 +486,6 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
             lastErrorMessage = errors.map((e) => e.message).join(", ");
           } else {
             activeCount++;
-          }
-        }
-
-        // 2. Create Matching Discount Code (for Shiprocket / Fastrr Checkout)
-        if (exp.code) {
-          const codeExists = existingAppDiscounts.some(
-            (n) => n.discount?.__typename === "DiscountCodeBasic" &&
-                   (n.discount?.title === exp.codeTitle || n.discount?.codes?.nodes?.some((c) => c.code === exp.code))
-          );
-          if (!codeExists) {
-            console.log(`[Sync] Creating matching discount code for Fastrr/Shiprocket: ${exp.code}`);
-            await admin.graphql(
-              `mutation CreateNativeDiscountCode($input: DiscountCodeBasicInput!) {
-                discountCodeBasicCreate(basicCodeDiscount: $input) {
-                  codeDiscountNode {
-                    id
-                    codeDiscount {
-                      ... on DiscountCodeBasic {
-                        title
-                        status
-                      }
-                    }
-                  }
-                  userErrors { field message }
-                }
-              }`,
-              {
-                variables: {
-                  input: {
-                    title: exp.codeTitle,
-                    code: exp.code,
-                    startsAt: new Date().toISOString(),
-                    customerSelection: { all: true },
-                    customerGets: {
-                      value: { percentage: Number(exp.discountPercent) / 100 },
-                      items: exp.targetType === "COLLECTION"
-                        ? { collections: { collectionsToAdd: [exp.targetGid] } }
-                        : { products: { productsToAdd: [exp.targetGid] } },
-                    },
-                    minimumRequirement: {
-                      quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
-                    },
-                    combinesWith: {
-                      orderDiscounts: true,
-                      productDiscounts: false,
-                      shippingDiscounts: true,
-                    },
-                  },
-                },
-              }
-            );
           }
         }
       }
