@@ -6,16 +6,30 @@
   const API_URL = "https://volume-discount-manager.onrender.com/api/config";
   const ROOT = window.Shopify?.routes?.root || "/";
 
-  const fmt = (cents) => "₹" + ((Number(cents) || 0) / 100).toFixed(2);
-  const $ = (sel, el = document) => el.querySelector(sel);
-  const $$ = (sel, el = document) => Array.from(el.querySelectorAll(sel));
+  const fmt = (c) => "₹" + ((Number(c) || 0) / 100).toFixed(2);
+  const fmtPrice = (c) => {
+    const v = Number(c) / 100;
+    return v % 1 === 0 ? "₹" + v.toFixed(0) : "₹" + v.toFixed(2);
+  };
+  const $ = (s, el = document) => el.querySelector(s);
+  const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
-  // Trigger standard storefront cart refresh so drawers update naturally without modifying their DOM
+  function getRoots() {
+    const r = [document];
+    try {
+      $$("*").forEach((el) => { if (el.shadowRoot && !r.includes(el.shadowRoot)) r.push(el.shadowRoot); });
+      $$("iframe").forEach((f) => {
+        try { if (f.contentDocument && !r.includes(f.contentDocument)) r.push(f.contentDocument); } catch {}
+      });
+    } catch {}
+    return r;
+  }
+
   function triggerRefresh() {
-    ["cart:refresh", "cart:updated", "cart:build"].forEach((name) => {
-      const evt = new CustomEvent(name, { bubbles: true });
-      window.dispatchEvent(evt);
-      document.dispatchEvent(evt);
+    ["cart:refresh", "cart:updated", "cart:build"].forEach((n) => {
+      const e = new CustomEvent(n, { bubbles: true });
+      window.dispatchEvent(e);
+      document.dispatchEvent(e);
     });
     try {
       window.Shiprocket?.refreshCart?.();
@@ -26,11 +40,11 @@
     } catch {}
 
     const drawer = $("cart-drawer");
-    if (drawer && typeof drawer.renderContents === "function") {
+    if (drawer?.renderContents) {
       fetch(ROOT + "?sections=cart-drawer,cart-icon-bubble")
         .then((r) => r.json())
-        .then((sections) => {
-          drawer.renderContents({ sections });
+        .then((s) => {
+          drawer.renderContents({ sections: s });
           drawer.open?.();
         })
         .catch(() => {});
@@ -38,19 +52,16 @@
   }
 
   function syncQty(qty) {
-    const input = ($('form[action*="/cart/add"]') || $(".product-form") || $("product-form"))?.querySelector('input[name="quantity"]');
-    if (input) {
-      input.value = String(qty);
-      input.dispatchEvent(new Event("change", { bubbles: true }));
+    const inp = ($('form[action*="/cart/add"]') || $(".product-form") || $("product-form"))?.querySelector('input[name="quantity"]');
+    if (inp) {
+      inp.value = String(qty);
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
     }
   }
 
-  // Pre-apply discount to session (just like Selleasy) so checkout picks it up automatically
-  function preapplyDiscount(code) {
+  function preapply(code) {
     if (!code) return;
-    try {
-      fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
-    } catch {}
+    try { fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {}); } catch {}
   }
 
   // 1. VOLUME WIDGET
@@ -102,7 +113,7 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
-          if (sel?.code) preapplyDiscount(sel.code);
+          if (sel?.code) preapply(sel.code);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -111,6 +122,7 @@
           if (!res.ok) throw new Error();
           btn.textContent = "✓ Added!";
           triggerRefresh();
+          setTimeout(syncDrawerPrice, 400);
           setTimeout(() => { btn.disabled = false; render(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -183,7 +195,7 @@
         btn.textContent = "Adding Bundle...";
         try {
           const bundleCode = wrap.dataset.code;
-          if (bundleCode) preapplyDiscount(bundleCode);
+          if (bundleCode) preapply(bundleCode);
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -192,6 +204,7 @@
           if (!res.ok) throw new Error();
           btn.textContent = "✓ Added Bundle!";
           triggerRefresh();
+          setTimeout(syncDrawerPrice, 400);
           setTimeout(() => { btn.disabled = false; calc(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -203,7 +216,7 @@
     calc();
   }
 
-  // 3. FETCH CONFIG
+  // 3. FETCH CONFIG & RULES
   let rulesCache = null;
   async function getRules() {
     if (rulesCache) return rulesCache;
@@ -215,16 +228,129 @@
     return [];
   }
 
-  // 4. PDP HYDRATION
+  // 4. CALCULATE DISCOUNT FROM RULES
+  function calcRuleDiscount(cart, rules) {
+    if (!cart?.items?.length || !rules?.length) return 0;
+    let disc = 0;
+    for (const r of rules) {
+      if (!r.active) continue;
+      const tId = String(r.targetGid || "").replace(/\D/g, "");
+      if (r.ruleType === "VOLUME" && r.tiers?.length) {
+        const items = cart.items.filter((it) => String(it.product_id) === tId);
+        const qty = items.reduce((s, it) => s + it.quantity, 0);
+        const t = [...r.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => qty >= x.minQuantity);
+        if (t) {
+          const sub = items.reduce((s, it) => s + (it.original_line_price || it.price * it.quantity), 0);
+          disc += Math.round(sub * (t.discountPercent / 100));
+        }
+      } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
+        const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
+        if (cart.items.some((it) => String(it.product_id) === tId) && cIds.some((id) => cart.items.some((it) => String(it.product_id) === id))) {
+          const bPct = Number(r.mainDiscountPercent || 0);
+          cart.items.forEach((it) => {
+            const pid = String(it.product_id);
+            const orig = it.original_line_price || it.price * it.quantity;
+            if (pid === tId && bPct > 0) disc += Math.round(orig * (bPct / 100));
+            const comp = r.fbtProducts.find((cp) => String(cp.productId).replace(/\D/g, "") === pid);
+            if (comp) disc += Math.round(orig * (Number(comp.discountPercent || bPct || 10) / 100));
+          });
+        }
+      }
+    }
+    return disc;
+  }
+
+  // 5. UPDATE ESTIMATED TOTAL PRICE IN DRAWER ONLY
+  function applyTotal(str) {
+    if (!str) return;
+    getRoots().forEach((root) => {
+      Array.from(root.querySelectorAll("*"))
+        .filter((el) => el.children.length <= 2 && /estimated total/i.test(el.textContent || ""))
+        .forEach((lbl) => {
+          let cur = lbl.parentElement;
+          for (let i = 0; i < 4 && cur && cur !== root; i++, cur = cur.parentElement) {
+            const pEls = Array.from(cur.querySelectorAll("*")).filter((el) =>
+              el.children.length === 0 &&
+              !el.closest("button") &&
+              !el.closest("[class*='item'], [class*='product']") &&
+              /^₹\s*[\d,]+(\.\d+)?$/.test((el.textContent || "").trim())
+            );
+
+            if (pEls.length > 0) {
+              const targetEl = pEls[pEls.length - 1];
+              if (targetEl.textContent.trim() !== str) targetEl.textContent = str;
+              for (let j = 0; j < pEls.length - 1; j++) pEls[j].style.display = "none";
+              break;
+            }
+          }
+        });
+    });
+  }
+
+  let activePriceStr = null;
+  let timer = null;
+
+  function setDrawerPrice(pStr) {
+    activePriceStr = pStr;
+    if (!pStr) return;
+    applyTotal(pStr);
+    if (timer) clearInterval(timer);
+    let ticks = 0;
+    timer = setInterval(() => {
+      if (activePriceStr) applyTotal(activePriceStr);
+      ticks++;
+      if (ticks > 25) clearInterval(timer);
+    }, 200);
+  }
+
+  async function syncDrawerPrice() {
+    try {
+      const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
+      if (!res.ok) return;
+      const cart = await res.json();
+      if (!cart?.items?.length) {
+        activePriceStr = null;
+        return;
+      }
+
+      let origTotal = cart.original_total_price || cart.total_price;
+      let finalTotal = cart.total_price;
+      let lineFinal = 0, lineOrig = 0;
+
+      cart.items.forEach((item) => {
+        const o = item.original_line_price ?? (item.original_price * item.quantity);
+        const f = item.final_line_price ?? (item.final_price ? item.final_price * item.quantity : o);
+        lineOrig += o;
+        lineFinal += f;
+      });
+
+      if (lineOrig > origTotal) origTotal = lineOrig;
+      if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
+
+      const rules = await getRules();
+      const ruleDisc = calcRuleDiscount(cart, rules);
+      if (ruleDisc > 0) {
+        const ruleFinal = Math.max(0, origTotal - ruleDisc);
+        if (ruleFinal < finalTotal) finalTotal = ruleFinal;
+      }
+
+      if (finalTotal < origTotal) {
+        setDrawerPrice(fmtPrice(finalTotal));
+      } else {
+        activePriceStr = null;
+      }
+    } catch {}
+  }
+
+  // 6. PDP HYDRATION
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
 
+    $$(".bt-volume-widget").forEach(initVolume);
+    $$(".bt-fbt-widget").forEach(initFbt);
+
     const ssrVol = $(".bt-volume-widget");
-    if (ssrVol && ssrVol.children.length) initVolume(ssrVol);
-
     const ssrFbt = $(".bt-fbt-widget");
-    if (ssrFbt && ssrFbt.children.length) initFbt(ssrFbt);
-
     if (ssrVol && ssrFbt) return;
 
     const rules = await getRules();
@@ -232,80 +358,54 @@
 
     const wrap = $(".bt-dual-widget-wrap");
     const pId = wrap?.dataset.productId || window.meta?.product?.id || "";
-    const vId = wrap?.dataset.variantId || $('[name="id"]')?.value || "";
-    const price = parseInt(wrap?.dataset.price || "40000", 10) || 40000;
     if (!pId) return;
     const pIdStr = String(pId);
 
-    // Dynamic Volume Injection
     if (!ssrVol) {
-      const r = rules.find((x) => {
-        if (!x.active || x.ruleType !== "VOLUME" || !x.tiers?.length) return false;
-        return x.targetType === "PRODUCT" ? String(x.targetGid || "").includes(pIdStr) : (x.collectionProductIds || []).map(String).includes(pIdStr);
-      });
-      if (r && r.tiers?.length) {
-        const sorted = r.tiers.filter((t) => t.minQuantity && t.discountPercent).sort((a, b) => a.minQuantity - b.minQuantity);
-        if (sorted.length) {
-          let h = "";
-          sorted.forEach((t, i) => {
-            const q = t.minQuantity || 1, d = t.discountPercent || 0, orig = price * q, disc = Math.round(orig * (100 - d) / 100);
-            h += `<div class="bt-tier-card ${i === 0 ? "is-selected" : ""}" data-min-qty="${q}" data-discount="${d}" data-code="${t.code || ""}">
-              <input type="radio" class="bt-tier-radio" ${i === 0 ? "checked" : ""}>
-              <div class="bt-tier-info"><span class="bt-tier-name">Buy ${q} &middot; Save ${d}%</span><span class="bt-tier-per-item">${fmt(Math.round(disc / q))}/each</span></div>
-              <div class="bt-tier-pricing"><span class="bt-tier-price-current">${fmt(disc)}</span><span class="bt-tier-price-compare">${fmt(orig)}</span></div>
-            </div>`;
-          });
-          const el = document.createElement("div");
-          el.className = "bt-widget-container bt-volume-widget";
-          el.dataset.variantId = String(vId);
-          el.dataset.productId = pIdStr;
-          el.innerHTML = `<h3 class="bt-widget-title">Buy More, Save More</h3><div class="bt-tiers-list">${h}</div><button type="button" class="bt-add-btn">Add To Cart</button><div class="bt-savings-summary"></div>`;
-          initVolume(el);
-          if (wrap) wrap.appendChild(el);
-          else {
-            const form = $('form[action*="/cart/add"]') || $(".product-form") || $("product-form");
-            const btn = form?.querySelector('button[type="submit"]') || form?.querySelector('[name="add"]');
-            btn?.parentNode ? btn.parentNode.insertBefore(el, btn) : form?.appendChild(el);
-          }
-        }
-      }
-    }
-
-    // Dynamic FBT Injection
-    if (!ssrFbt) {
-      const fbt = rules.find((x) => x.active && x.ruleType === "FBT" && x.fbtProducts?.length && String(x.targetGid || "").includes(pIdStr));
-      if (fbt && fbt.fbtProducts?.length) {
-        const bDisc = Number(fbt.mainDiscountPercent || 0);
-        let gHtml = `<div class="bt-fbt-thumb-card is-base"><span class="bt-fbt-thumb-label">This item</span>${bDisc > 0 ? `<span class="bt-fbt-thumb-badge">-${bDisc}%</span>` : ""}</div>`;
-        let lHtml = `<label class="bt-fbt-row is-base"><input type="checkbox" checked disabled class="bt-fbt-checkbox"><span class="bt-fbt-check-label"><strong>This item:</strong> Selected Item</span><span class="bt-fbt-row-price">${fmt(bDisc > 0 ? Math.round(price * (100 - bDisc) / 100) : price)}</span></label>`;
-
-        fbt.fbtProducts.forEach((item) => {
-          const cp = item.priceCents || 0, cd = item.discountPercent || 10, cdp = Math.round(cp * (100 - cd) / 100);
-          gHtml += `<div class="bt-fbt-plus-icon">+</div><div class="bt-fbt-thumb-card" data-fbt-card-id="${item.productId}">${item.image ? `<img src="${item.image}" class="bt-fbt-img" width="80" height="80"/>` : `<div class="bt-fbt-no-img">${(item.title || "").slice(0, 8)}</div>`}<span class="bt-fbt-thumb-badge">-${cd}%</span></div>`;
-          lHtml += `<label class="bt-fbt-row"><input type="checkbox" checked class="bt-fbt-checkbox bt-fbt-companion-checkbox" data-product-id="${item.productId}" data-variant-id="${item.variantId}" data-price="${cp}" data-discount="${cd}"/><span class="bt-fbt-check-label">${item.title} <span class="bt-fbt-save-pill">Save ${cd}%</span></span><span class="bt-fbt-row-price">${fmt(cdp)}</span></label>`;
-        });
-
+      const r = rules.find((x) => x.active && x.ruleType === "VOLUME" && x.tiers?.length && (x.targetType === "PRODUCT" ? String(x.targetGid || "").includes(pIdStr) : (x.collectionProductIds || []).map(String).includes(pIdStr)));
+      if (r?.tiers?.length) {
         const el = document.createElement("div");
-        el.className = "bt-widget-container bt-fbt-widget";
-        el.dataset.baseVariantId = String(vId);
-        el.dataset.basePrice = String(price);
-        el.dataset.baseDiscount = String(bDisc);
-        el.dataset.code = fbt.discountCode || "";
-        el.innerHTML = `<div class="bt-widget-header"><h3 class="bt-widget-title">Frequently Bought Together</h3><p class="bt-widget-subtitle">Bundle these items together and save</p></div><div class="bt-fbt-gallery">${gHtml}</div><div class="bt-fbt-list">${lHtml}</div><div class="bt-fbt-summary-wrap"><div class="bt-fbt-total-box"><div class="bt-fbt-total-label">Bundle Price:</div><div class="bt-fbt-pricing"><span class="bt-fbt-bundle-price"></span><span class="bt-fbt-bundle-compare"></span></div></div><button type="button" class="bt-fbt-add-btn">Add Bundle To Cart</button><div class="bt-fbt-savings-note"></div></div>`;
-        initFbt(el);
-        if (wrap) wrap.appendChild(el);
-        else {
-          const form = $('form[action*="/cart/add"]') || $(".product-form") || $("product-form");
-          form?.appendChild(el);
-        }
+        el.className = "bt-widget-container bt-volume-widget";
+        el.dataset.variantId = $('[name="id"]')?.value || "";
+        el.innerHTML = '<h3 class="bt-widget-title">Buy More, Save More</h3><div class="bt-tiers-list">' +
+          r.tiers.map((t, i) => `<div class="bt-tier-card ${i === 0 ? "is-selected" : ""}" data-min-qty="${t.minQuantity}" data-discount="${t.discountPercent}" data-code="${t.code || ""}"><input type="radio" class="bt-tier-radio" ${i === 0 ? "checked" : ""}><div class="bt-tier-info"><span class="bt-tier-name">Buy ${t.minQuantity} · Save ${t.discountPercent}%</span></div></div>`).join("") +
+          '</div><button type="button" class="bt-add-btn">Add To Cart</button><div class="bt-savings-summary"></div>';
+        initVolume(el);
+        (wrap || $('form[action*="/cart/add"]') || $(".product-form"))?.appendChild(el);
       }
     }
   }
 
+  // 7. OBSERVER & INTERCEPTOR
+  let obsTimer = null;
+  const observer = new MutationObserver(() => {
+    if (!activePriceStr || obsTimer) return;
+    obsTimer = setTimeout(() => {
+      obsTimer = null;
+      if (activePriceStr) applyTotal(activePriceStr);
+    }, 120);
+  });
+
+  const _fetch = window.fetch;
+  window.fetch = function(...args) {
+    const res = _fetch.apply(this, args);
+    try {
+      const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+      if (/\/cart\/(add|change|update|clear)/.test(url)) {
+        res.then(() => setTimeout(syncDrawerPrice, 300)).catch(() => {});
+      }
+    } catch {}
+    return res;
+  };
+
   function start() {
     hydratePdp();
+    setTimeout(syncDrawerPrice, 600);
+    try { observer.observe(document.body, { childList: true, subtree: true }); } catch {}
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
   document.addEventListener("shopify:section:load", start);
+  window.addEventListener("cart:refresh", () => setTimeout(syncDrawerPrice, 200));
+  window.addEventListener("cart:updated", () => setTimeout(syncDrawerPrice, 200));
 })();
