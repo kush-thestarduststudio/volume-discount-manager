@@ -345,11 +345,11 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       }
     }
 
-    // 2. Sync Native Shopify Automatic Discounts (Only 1 automatic discount per volume tier)
+    // 2. Sync Native Shopify Discounts (Automatic Discounts + Clean Shiprocket Import Codes)
     try {
       const discountRes = await admin.graphql(`
         query GetDiscounts {
-          discountNodes(first: 50) {
+          discountNodes(first: 100) {
             nodes {
               id
               discount {
@@ -361,10 +361,11 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                 ... on DiscountCodeBasic {
                   title
                   status
-                }
-                ... on DiscountAutomaticApp {
-                  title
-                  status
+                  codes(first: 1) {
+                    nodes {
+                      code
+                    }
+                  }
                 }
               }
             }
@@ -374,73 +375,118 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       const discountJson = await discountRes.json();
       const allNodes = discountJson?.data?.discountNodes?.nodes || [];
 
-      // Find all existing [Volume] discount nodes (both automatic and code-based)
-      const existingAppDiscounts = allNodes.filter(
-        (n) => n.discount?.title?.startsWith("[Volume]") || n.discount?.title?.includes("Bundle & Tier")
-      );
+      // Find all existing discount nodes managed by our app
+      const existingAppDiscounts = allNodes.filter((n) => {
+        const title = n.discount?.title || "";
+        return (
+          title.startsWith("[Volume") ||
+          title.startsWith("[Bundle") ||
+          title.includes("Bundle & Tier")
+        );
+      });
 
-      // Build expected automatic discounts from currently active volume rules
+      // Build expected discounts for both VOLUME and FBT rules
       const expectedDiscounts = [];
+
       for (const rule of activeRulesPayload) {
+        const cleanSlug =
+          rule.title.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8) || "OFFER";
+
         if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
           for (const tier of rule.tiers) {
             if (tier.minQuantity > 0 && tier.discountPercent > 0) {
+              const autoTitle = `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`;
+              const codeTitle = `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`;
+              const code = `${cleanSlug}-BUY${tier.minQuantity}-${tier.discountPercent}OFF`;
+
               expectedDiscounts.push({
-                autoTitle: `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`,
+                type: "VOLUME",
+                autoTitle,
+                codeTitle,
+                code,
                 minQuantity: tier.minQuantity,
                 discountPercent: tier.discountPercent,
                 targetType: rule.targetType,
                 targetGid: rule.targetGid,
+                targetGids: [rule.targetGid],
               });
             }
+          }
+        } else if (rule.ruleType === "FBT" && Array.isArray(rule.fbtProducts) && rule.fbtProducts.length > 0) {
+          const companionGids = rule.fbtProducts
+            .map((p) => (p.productId?.startsWith("gid://") ? p.productId : "gid://shopify/Product/" + p.productId))
+            .filter(Boolean);
+          const allBundleGids = [rule.targetGid, ...companionGids];
+          const bundleDiscountPct =
+            Number(rule.mainDiscountPercent) > 0
+              ? Number(rule.mainDiscountPercent)
+              : Number(rule.fbtProducts[0]?.discountPercent) || 10;
+          const bundleMinQty = allBundleGids.length;
+
+          const autoTitle = `[Bundle] ${rule.title} (${bundleDiscountPct}% OFF)`;
+          const codeTitle = `[Bundle Code] ${rule.title} (${bundleDiscountPct}% OFF)`;
+          const code = `BUNDLE-${cleanSlug}-${bundleDiscountPct}OFF`;
+
+          expectedDiscounts.push({
+            type: "FBT",
+            autoTitle,
+            codeTitle,
+            code,
+            minQuantity: bundleMinQty,
+            discountPercent: bundleDiscountPct,
+            targetType: "PRODUCT",
+            targetGid: rule.targetGid,
+            targetGids: allBundleGids,
+          });
+        }
+      }
+
+      // Cleanup outdated discounts in Shopify Admin
+      for (const oldNode of existingAppDiscounts) {
+        const title = oldNode.discount?.title || "";
+        const isCode = oldNode.discount?.__typename === "DiscountCodeBasic";
+
+        const isNeeded = expectedDiscounts.some((exp) =>
+          isCode ? exp.codeTitle === title : exp.autoTitle === title
+        );
+
+        if (!isNeeded) {
+          console.log(`[Sync] Removing outdated discount: ${title}`);
+          if (isCode) {
+            await admin.graphql(
+              `mutation DeleteCodeDiscount($id: ID!) {
+                discountCodeDelete(id: $id) {
+                  userErrors { field message }
+                }
+              }`,
+              { variables: { id: oldNode.id } }
+            );
+          } else {
+            await admin.graphql(
+              `mutation DeleteAutoDiscount($id: ID!) {
+                discountAutomaticDelete(id: $id) {
+                  userErrors { field message }
+                }
+              }`,
+              { variables: { id: oldNode.id } }
+            );
           }
         }
       }
 
-      // Delete any code discounts or outdated automatic discounts
-      for (const oldNode of existingAppDiscounts) {
-        const title = oldNode.discount?.title || "";
-
-        // Delete any code discounts (merchant only wants pure Automatic Discounts)
-        if (oldNode.discount?.__typename === "DiscountCodeBasic") {
-          console.log(`[CleanSync] Deleting code discount (only automatic discount allowed): ${title}`);
-          await admin.graphql(
-            `mutation DeleteCodeDiscount($id: ID!) {
-              discountCodeDelete(id: $id) {
-                userErrors { field message }
-              }
-            }`,
-            { variables: { id: oldNode.id } }
-          );
-          continue;
-        }
-
-        // For automatic discounts, delete if not in expected list
-        const isNeeded = expectedDiscounts.some(
-          (exp) => exp.autoTitle === title && oldNode.discount?.__typename === "DiscountAutomaticBasic"
-        );
-        if (!isNeeded) {
-          console.log(`[Sync] Removing outdated automatic discount: ${title}`);
-          await admin.graphql(
-            `mutation DeleteAutoDiscount($id: ID!) {
-              discountAutomaticDelete(id: $id) {
-                userErrors { field message }
-              }
-            }`,
-            { variables: { id: oldNode.id } }
-          );
-        }
-      }
-
-      // Create expected automatic discounts that don't already exist
-      let activeCount = 0;
+      // Create expected automatic discounts & code discounts if missing
+      let activeAutoCount = 0;
+      let activeCodeCount = 0;
       let lastErrorMessage = "";
+
       for (const exp of expectedDiscounts) {
+        // 1. Automatic Discount
         const autoExists = existingAppDiscounts.some(
           (n) => n.discount?.__typename === "DiscountAutomaticBasic" && n.discount?.title === exp.autoTitle
         );
+
         if (autoExists) {
-          activeCount++;
+          activeAutoCount++;
         } else {
           const createRes = await admin.graphql(
             `mutation CreateNativeAutomaticDiscount($input: DiscountAutomaticBasicInput!) {
@@ -464,16 +510,17 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                   startsAt: new Date().toISOString(),
                   customerGets: {
                     value: { percentage: Number(exp.discountPercent) / 100 },
-                    items: exp.targetType === "COLLECTION"
-                      ? { collections: { collectionsToAdd: [exp.targetGid] } }
-                      : { products: { productsToAdd: [exp.targetGid] } },
+                    items:
+                      exp.targetType === "COLLECTION"
+                        ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                        : { products: { productsToAdd: exp.targetGids } },
                   },
                   minimumRequirement: {
                     quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
                   },
                   combinesWith: {
                     orderDiscounts: true,
-                    productDiscounts: false,
+                    productDiscounts: true,
                     shippingDiscounts: true,
                   },
                 },
@@ -485,7 +532,58 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
           if (errors && errors.length > 0) {
             lastErrorMessage = errors.map((e) => e.message).join(", ");
           } else {
-            activeCount++;
+            activeAutoCount++;
+          }
+        }
+
+        // 2. Code Discount (For Shiprocket Fastrr 1-Click Import)
+        const codeExists = existingAppDiscounts.some(
+          (n) => n.discount?.__typename === "DiscountCodeBasic" && n.discount?.title === exp.codeTitle
+        );
+
+        if (codeExists) {
+          activeCodeCount++;
+        } else {
+          const createCodeRes = await admin.graphql(
+            `mutation CreateNativeCodeDiscount($input: DiscountCodeBasicInput!) {
+              discountCodeBasicCreate(basicCodeDiscount: $input) {
+                codeDiscountNode {
+                  id
+                }
+                userErrors { field message }
+              }
+            }`,
+            {
+              variables: {
+                input: {
+                  title: exp.codeTitle,
+                  code: exp.code,
+                  startsAt: new Date().toISOString(),
+                  customerGets: {
+                    value: { percentage: Number(exp.discountPercent) / 100 },
+                    items:
+                      exp.targetType === "COLLECTION"
+                        ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                        : { products: { productsToAdd: exp.targetGids } },
+                  },
+                  minimumRequirement: {
+                    quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
+                  },
+                  combinesWith: {
+                    orderDiscounts: true,
+                    productDiscounts: true,
+                    shippingDiscounts: true,
+                  },
+                },
+              },
+            }
+          );
+          const codeJson = await createCodeRes.json();
+          const codeErrors = codeJson?.data?.discountCodeBasicCreate?.userErrors;
+          if (codeErrors && codeErrors.length > 0) {
+            console.warn("[CodeDiscountSync] Warning:", codeErrors.map((e) => e.message).join(", "));
+          } else {
+            activeCodeCount++;
           }
         }
       }
@@ -493,9 +591,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       if (lastErrorMessage) {
         discountStatus = `CREATE_ERROR: ${lastErrorMessage}`;
       } else if (expectedDiscounts.length === 0) {
-        discountStatus = "No active volume tiers configured yet. Click 'Create Volume Discount' to get started!";
+        discountStatus = "No active discount rules configured yet. Click 'Create Volume Discount' or 'Create FBT Bundle' to start!";
       } else {
-        discountStatus = `ACTIVE (${activeCount} native Shopify automatic discount tier(s) running live)`;
+        discountStatus = `ACTIVE (${activeAutoCount} automatic discounts + ${activeCodeCount} Shiprocket import codes active)`;
       }
     } catch (fnErr) {
       console.error("[Shopify Discount Sync] Error:", fnErr.message || fnErr);
@@ -818,11 +916,15 @@ export default function BundleTierIndex() {
         {/* ---------------- TAB 1: VOLUME DISCOUNTS ---------------- */}
         {activeTab === "volume" && (
           <>
-            <s-banner tone="info" heading="Independent Volume Tiers">
-              <s-text>
-                Volume discounts appear only on PDPs for products/collections you select here. Extra units outside the tier retain their regular full price.
-              </s-text>
-            </s-banner>
+            <div style={{ backgroundColor: "#eef9f5", border: "1px solid #c2ece0", borderRadius: "8px", padding: "12px 16px", marginBottom: "16px" }}>
+              <p style={{ margin: 0, fontSize: "0.9rem", color: "#006e52", fontWeight: 700 }}>
+                🚀 Shiprocket Fastrr & Storefront Setup:
+              </p>
+              <p style={{ margin: "4px 0 0 0", fontSize: "0.85rem", color: "#2c3e50", lineHeight: 1.5 }}>
+                • <strong>Online Store:</strong> Tiers apply <em>automatically</em> in Shopify cart &amp; checkout.<br />
+                • <strong>Shiprocket Fastrr:</strong> Shiprocket's "Import Discount" modal accepts discount codes. Copy the exact <strong>Code</strong> from the table below and paste it in Shiprocket &gt; Discounts &gt; Import Discount.
+              </p>
+            </div>
 
             {volumeRules.length === 0 ? (
               <s-section>
@@ -842,58 +944,69 @@ export default function BundleTierIndex() {
                   <s-table-header-row>
                     <s-table-header listSlot="primary">Campaign Name</s-table-header>
                     <s-table-header listSlot="labeled">Target Scope</s-table-header>
-                    <s-table-header listSlot="labeled">Volume Tiers</s-table-header>
+                    <s-table-header listSlot="labeled">Volume Tiers &amp; Shiprocket Code</s-table-header>
                     <s-table-header listSlot="inline">Status</s-table-header>
                     <s-table-header listSlot="secondary">Actions</s-table-header>
                   </s-table-header-row>
                   <s-table-body>
-                    {volumeRules.map((rule) => (
-                      <s-table-row key={rule.id}>
-                        <s-table-cell>
-                          <s-text type="strong">{rule.title}</s-text>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-badge tone={rule.targetType === "PRODUCT" ? "info" : "attention"}>
-                            {rule.targetType}
-                          </s-badge>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-stack direction="inline" gap="extra-tight">
-                            {rule.tiers.map((t, i) => (
-                              <s-badge key={i} tone="success">
-                                {t.minQuantity}+ ({t.discountPercent}%)
-                              </s-badge>
-                            ))}
-                          </s-stack>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-badge tone={rule.active ? "success" : "subdued"}>
-                            {rule.active ? "ACTIVE" : "DRAFT"}
-                          </s-badge>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-stack direction="inline" gap="tight">
-                            <s-button size="slim" onClick={() => openEditVolumeModal(rule)}>
-                              Edit
-                            </s-button>
-                            <s-button
-                              size="slim"
-                              tone={rule.active ? "subdued" : "success"}
-                              onClick={() => handleToggleStatus(rule)}
-                            >
-                              {rule.active ? "Deactivate" : "Activate"}
-                            </s-button>
-                            <s-button
-                              size="slim"
-                              tone="critical"
-                              onClick={() => handleDeleteRule(rule.id)}
-                            >
-                              Delete
-                            </s-button>
-                          </s-stack>
-                        </s-table-cell>
-                      </s-table-row>
-                    ))}
+                    {volumeRules.map((rule) => {
+                      const cleanSlug = rule.title.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8) || "OFFER";
+                      return (
+                        <s-table-row key={rule.id}>
+                          <s-table-cell>
+                            <s-text type="strong">{rule.title}</s-text>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-badge tone={rule.targetType === "PRODUCT" ? "info" : "attention"}>
+                              {rule.targetType}
+                            </s-badge>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-stack direction="block" gap="extra-tight">
+                              {rule.tiers.map((t, i) => {
+                                const code = `${cleanSlug}-BUY${t.minQuantity}-${t.discountPercent}OFF`;
+                                return (
+                                  <div key={i} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+                                    <s-badge tone="success">
+                                      {t.minQuantity}+ ({t.discountPercent}%)
+                                    </s-badge>
+                                    <span style={{ fontSize: "0.75rem", fontFamily: "monospace", background: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#202223" }}>
+                                      Code: {code}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </s-stack>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-badge tone={rule.active ? "success" : "subdued"}>
+                              {rule.active ? "ACTIVE" : "DRAFT"}
+                            </s-badge>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-stack direction="inline" gap="tight">
+                              <s-button size="slim" onClick={() => openEditVolumeModal(rule)}>
+                                Edit
+                              </s-button>
+                              <s-button
+                                size="slim"
+                                tone={rule.active ? "subdued" : "success"}
+                                onClick={() => handleToggleStatus(rule)}
+                              >
+                                {rule.active ? "Deactivate" : "Activate"}
+                              </s-button>
+                              <s-button
+                                size="slim"
+                                tone="critical"
+                                onClick={() => handleDeleteRule(rule.id)}
+                              >
+                                Delete
+                              </s-button>
+                            </s-stack>
+                          </s-table-cell>
+                        </s-table-row>
+                      );
+                    })}
                   </s-table-body>
                 </s-table>
               </s-section>
@@ -904,11 +1017,15 @@ export default function BundleTierIndex() {
         {/* ---------------- TAB 2: FREQUENTLY BOUGHT TOGETHER ---------------- */}
         {activeTab === "fbt" && (
           <>
-            <s-banner tone="info" heading="Frequently Bought Together (Bundles)">
-              <s-text>
-                FBT bundles appear exclusively on the product page of the target trigger item. Customers can add the bundle with 1-click and get the companion discounts.
-              </s-text>
-            </s-banner>
+            <div style={{ backgroundColor: "#eef9f5", border: "1px solid #c2ece0", borderRadius: "8px", padding: "12px 16px", marginBottom: "16px" }}>
+              <p style={{ margin: 0, fontSize: "0.9rem", color: "#006e52", fontWeight: 700 }}>
+                🚀 Shiprocket Fastrr &amp; Storefront Setup:
+              </p>
+              <p style={{ margin: "4px 0 0 0", fontSize: "0.85rem", color: "#2c3e50", lineHeight: 1.5 }}>
+                • <strong>Online Store:</strong> FBT bundle appears right under the product on the PDP. Adding the bundle applies discounts automatically.<br />
+                • <strong>Shiprocket Fastrr:</strong> Copy the exact <strong>Code</strong> below and paste it in Shiprocket &gt; Discounts &gt; Import Discount.
+              </p>
+            </div>
 
             {fbtRules.length === 0 ? (
               <s-section>
@@ -928,61 +1045,71 @@ export default function BundleTierIndex() {
                   <s-table-header-row>
                     <s-table-header listSlot="primary">Bundle Name</s-table-header>
                     <s-table-header listSlot="labeled">Trigger Product</s-table-header>
-                    <s-table-header listSlot="labeled">Companion Items</s-table-header>
+                    <s-table-header listSlot="labeled">Companion Items &amp; Shiprocket Code</s-table-header>
                     <s-table-header listSlot="inline">Status</s-table-header>
                     <s-table-header listSlot="secondary">Actions</s-table-header>
                   </s-table-header-row>
                   <s-table-body>
-                    {fbtRules.map((rule) => (
-                      <s-table-row key={rule.id}>
-                        <s-table-cell>
-                          <s-text type="strong">{rule.title}</s-text>
-                          {rule.mainDiscountPercent > 0 && (
-                            <span style={{ marginLeft: "8px", fontSize: "0.75rem", background: "#e3f1df", color: "#008060", padding: "2px 6px", borderRadius: "4px", fontWeight: 700 }}>
-                              Main: -{rule.mainDiscountPercent}%
-                            </span>
-                          )}
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-badge tone="info">Product</s-badge>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-stack direction="inline" gap="extra-tight">
-                            {rule.fbtProducts.map((p, i) => (
-                              <s-badge key={i} tone="success">
-                                {p.title} (-{p.discountPercent}%)
-                              </s-badge>
-                            ))}
-                          </s-stack>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-badge tone={rule.active ? "success" : "subdued"}>
-                            {rule.active ? "ACTIVE" : "DRAFT"}
-                          </s-badge>
-                        </s-table-cell>
-                        <s-table-cell>
-                          <s-stack direction="inline" gap="tight">
-                            <s-button size="slim" onClick={() => openEditFbtModal(rule)}>
-                              Edit
-                            </s-button>
-                            <s-button
-                              size="slim"
-                              tone={rule.active ? "subdued" : "success"}
-                              onClick={() => handleToggleStatus(rule)}
-                            >
-                              {rule.active ? "Deactivate" : "Activate"}
-                            </s-button>
-                            <s-button
-                              size="slim"
-                              tone="critical"
-                              onClick={() => handleDeleteRule(rule.id)}
-                            >
-                              Delete
-                            </s-button>
-                          </s-stack>
-                        </s-table-cell>
-                      </s-table-row>
-                    ))}
+                    {fbtRules.map((rule) => {
+                      const cleanSlug = rule.title.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8) || "BUNDLE";
+                      const bundlePct = Number(rule.mainDiscountPercent) > 0 ? Number(rule.mainDiscountPercent) : Number(rule.fbtProducts[0]?.discountPercent) || 10;
+                      const code = `BUNDLE-${cleanSlug}-${bundlePct}OFF`;
+                      return (
+                        <s-table-row key={rule.id}>
+                          <s-table-cell>
+                            <s-text type="strong">{rule.title}</s-text>
+                            {rule.mainDiscountPercent > 0 && (
+                              <span style={{ marginLeft: "8px", fontSize: "0.75rem", background: "#e3f1df", color: "#008060", padding: "2px 6px", borderRadius: "4px", fontWeight: 700 }}>
+                                Main: -{rule.mainDiscountPercent}%
+                              </span>
+                            )}
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-badge tone="info">Product</s-badge>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-stack direction="block" gap="extra-tight">
+                              <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "4px" }}>
+                                {rule.fbtProducts.map((p, i) => (
+                                  <s-badge key={i} tone="success">
+                                    {p.title} (-{p.discountPercent}%)
+                                  </s-badge>
+                                ))}
+                              </div>
+                              <span style={{ fontSize: "0.75rem", fontFamily: "monospace", background: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#202223" }}>
+                                Shiprocket Code: {code}
+                              </span>
+                            </s-stack>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-badge tone={rule.active ? "success" : "subdued"}>
+                              {rule.active ? "ACTIVE" : "DRAFT"}
+                            </s-badge>
+                          </s-table-cell>
+                          <s-table-cell>
+                            <s-stack direction="inline" gap="tight">
+                              <s-button size="slim" onClick={() => openEditFbtModal(rule)}>
+                                Edit
+                              </s-button>
+                              <s-button
+                                size="slim"
+                                tone={rule.active ? "subdued" : "success"}
+                                onClick={() => handleToggleStatus(rule)}
+                              >
+                                {rule.active ? "Deactivate" : "Activate"}
+                              </s-button>
+                              <s-button
+                                size="slim"
+                                tone="critical"
+                                onClick={() => handleDeleteRule(rule.id)}
+                              >
+                                Delete
+                              </s-button>
+                            </s-stack>
+                          </s-table-cell>
+                        </s-table-row>
+                      );
+                    })}
                   </s-table-body>
                 </s-table>
               </s-section>
