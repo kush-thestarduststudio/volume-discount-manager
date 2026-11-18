@@ -64,7 +64,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       });
     }
 
-    let parsedRules = rules.map((r) => {
+    let widgetSettings = {
+      template: "cards",
+      accentColor: "#008060",
+      bgColor: "#ffffff",
+      textColor: "#1a1a1a",
+      borderColor: "#e1e3e5",
+      badgeBg: "#008060",
+      badgeText: "#ffffff",
+      fontSize: "15px",
+      borderRadius: "8px",
+    };
+    const settingsRule = rules.find((r) => r.targetType === "SETTINGS");
+    if (settingsRule) {
+      try {
+        widgetSettings = { ...widgetSettings, ...JSON.parse(settingsRule.tiers || "{}") };
+      } catch {}
+    }
+
+    const discountRules = rules.filter((r) => r.targetType !== "SETTINGS");
+
+    let parsedRules = discountRules.map((r) => {
       let tiers: any[] = [];
       let fbtProducts: any[] = [];
       let mainDiscountPercent = 0;
@@ -97,7 +117,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       const isFbt = r.targetType === "PRODUCT" && fbtProducts.length > 0 && tiers.length === 0;
 
       const cleanName = r.title
-        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
         .replace(/[^a-zA-Z0-9]/g, "")
         .toUpperCase()
         .slice(0, 8) || (isFbt ? "BUNDLE" : "OFFER");
@@ -140,6 +160,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         ok: true,
         shop: cleanShop || "stardustt-studio.myshopify.com",
         rules: parsedRules,
+        settings: widgetSettings,
       }),
       { headers }
     );

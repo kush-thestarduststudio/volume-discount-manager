@@ -83,7 +83,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       } catch {}
       const isFbt = fbtProducts.length > 0 && tiers.length === 0;
       const cleanName = r.title
-        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
         .replace(/[^a-zA-Z0-9]/g, "")
         .toUpperCase()
         .slice(0, 8) || (isFbt ? "BUNDLE" : "OFFER");
@@ -221,10 +221,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const expectedDiscounts: any[] = [];
     for (const rule of activeRulesPayload) {
       const cleanName = rule.title
-        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
         .replace(/[^a-zA-Z0-9]/g, "")
         .toUpperCase()
-        .slice(0, 8) || "OFFER";
+        .slice(0, 8) || (rule.ruleType === "FBT" ? "BUNDLE" : "OFFER");
 
       if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
         for (const tier of rule.tiers) {

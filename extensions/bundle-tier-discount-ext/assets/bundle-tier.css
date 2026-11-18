@@ -1,14 +1,135 @@
 /* Bundle & Tier Discounts Widget Styles */
+:root {
+  --bt-accent: #008060;
+  --bt-bg: #ffffff;
+  --bt-text: #202223;
+  --bt-border: #e1e3e5;
+  --bt-badge-bg: #008060;
+  --bt-badge-text: #ffffff;
+  --bt-font-size: 15px;
+  --bt-radius: 8px;
+}
+
 .bt-widget-container {
   margin: 1.5rem 0;
   padding: 1.25rem;
-  background: #ffffff;
-  border: 1px solid #e1e3e5;
-  border-radius: 12px;
+  background: var(--bt-bg, #ffffff);
+  border: 1px solid var(--bt-border, #e1e3e5);
+  border-radius: var(--bt-radius, 12px);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  color: #202223;
+  color: var(--bt-text, #202223);
+  font-size: var(--bt-font-size, 15px);
   box-sizing: border-box;
+}
+
+.bt-tier-card {
+  border-radius: var(--bt-radius, 8px);
+  border: 2px solid var(--bt-border, #e1e3e5);
+}
+
+.bt-tier-card:hover {
+  border-color: var(--bt-accent, #008060);
+}
+
+.bt-tier-card.is-selected {
+  border-color: var(--bt-accent, #008060);
+  box-shadow: 0 0 0 1px var(--bt-accent, #008060);
+}
+
+.bt-tier-radio, .bt-fbt-checkbox {
+  accent-color: var(--bt-accent, #008060);
+}
+
+.bt-tier-badge, .bt-fbt-thumb-badge, .bt-fbt-save-pill {
+  background: var(--bt-badge-bg, var(--bt-accent, #008060)) !important;
+  color: var(--bt-badge-text, #ffffff) !important;
+}
+
+.bt-add-btn, .bt-fbt-add-btn {
+  background: var(--bt-accent, #008060) !important;
+  border-radius: var(--bt-radius, 8px) !important;
+}
+
+/* ================= 5 UI TEMPLATES ================= */
+/* 1. Modern Cards (.bt-template-cards) - Default */
+.bt-template-cards .bt-tier-card {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+/* 2. Minimalist List (.bt-template-minimal) */
+.bt-template-minimal {
+  box-shadow: none !important;
+  border-left: none !important;
+  border-right: none !important;
+  border-radius: 0 !important;
+}
+.bt-template-minimal .bt-tier-card {
+  border-top: none !important;
+  border-left: none !important;
+  border-right: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 0.75rem 0.25rem !important;
+  box-shadow: none !important;
+}
+.bt-template-minimal .bt-tier-card.is-selected {
+  border-bottom: 2px solid var(--bt-accent, #008060) !important;
+}
+
+/* 3. Grid Boxes (.bt-template-grid) */
+.bt-template-grid .bt-tiers-list {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)) !important;
+  gap: 10px !important;
+}
+.bt-template-grid .bt-tier-card {
+  flex-direction: column !important;
+  align-items: center !important;
+  text-align: center !important;
+  padding: 12px 8px !important;
+}
+.bt-template-grid .bt-tier-pricing {
+  align-items: center !important;
+  text-align: center !important;
+  margin-top: 6px !important;
+}
+.bt-template-grid .bt-tier-badge {
+  position: static !important;
+  margin-bottom: 4px !important;
+}
+
+/* 4. Pill Selector (.bt-template-pills) */
+.bt-template-pills .bt-tiers-list {
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+}
+.bt-template-pills .bt-tier-card {
+  padding: 8px 16px !important;
+  border-radius: 9999px !important;
+  border-width: 1px !important;
+}
+.bt-template-pills .bt-tier-radio {
+  display: none !important;
+}
+.bt-template-pills .bt-tier-pricing {
+  display: none !important;
+}
+.bt-template-pills .bt-tier-card.is-selected {
+  background: var(--bt-accent, #008060) !important;
+  color: #ffffff !important;
+}
+.bt-template-pills .bt-tier-card.is-selected .bt-tier-name {
+  color: #ffffff !important;
+}
+
+/* 5. Highlighted Tier Banner (.bt-template-banner) */
+.bt-template-banner .bt-tier-card.is-selected {
+  border-width: 2px !important;
+  border-color: var(--bt-accent, #008060) !important;
+  background: #f6fbf9 !important;
 }
 
 .bt-widget-header {

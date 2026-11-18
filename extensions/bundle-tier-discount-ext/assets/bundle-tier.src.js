@@ -51,8 +51,20 @@
       if (code) {
         fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
         document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
+        document.cookie = "fastrrCouponCode=" + encodeURIComponent(code) + "; path=/; max-age=86400";
+        try { localStorage.setItem("fastrrCouponCode", code); } catch {}
+        try { sessionStorage.setItem("fastrrCouponCode", code); } catch {}
+        try { localStorage.setItem("discount_code", code); } catch {}
+        try {
+          window.Fastrr?.applyCoupon?.(code);
+          window.Fastrr?.cart?.applyCoupon?.(code);
+          window.Shiprocket?.applyCoupon?.(code);
+        } catch {}
       } else {
         document.cookie = "discount_code=; path=/; max-age=0";
+        document.cookie = "fastrrCouponCode=; path=/; max-age=0";
+        try { localStorage.removeItem("fastrrCouponCode"); } catch {}
+        try { sessionStorage.removeItem("fastrrCouponCode"); } catch {}
       }
     } catch {}
   }
@@ -226,23 +238,36 @@
   }
 
   // 3. FETCH CONFIG & RULES
-  let rulesCache = null;
-  async function getRules() {
-    if (rulesCache) return rulesCache;
+  let configCache = null;
+  async function getConfig() {
+    if (configCache) return configCache;
     try {
       const shop = window.Shopify?.shop || window.location.hostname;
       const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}`)).json();
-      if (res?.ok && Array.isArray(res.rules)) return (rulesCache = res.rules);
+      if (res?.ok) {
+        configCache = res;
+        return res;
+      }
     } catch {}
-    return [];
+    return { rules: window.__btRules || [], settings: window.__btSettings || {} };
   }
 
-  // 4. FIND APPLICABLE DISCOUNT & CODE
-  const cleanCode = (t) => t.replace(/^(volume tier:\s*|collection tier:\s*|bundle for:\s*)/i, "").replace(/\W/g, "").toUpperCase().slice(0, 8) || "OFFER";
+  async function getRules() {
+    const cfg = await getConfig();
+    return Array.isArray(cfg?.rules) ? cfg.rules : [];
+  }
+
+  // 4. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
+  const cleanCode = (t) =>
+    (t || "")
+      .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
+      .replace(/[^a-zA-Z0-9]/g, "")
+      .toUpperCase()
+      .slice(0, 8) || "OFFER";
 
   function getActiveDiscount(cart, rules) {
     if (!cart?.items?.length || !rules?.length) return { disc: 0, code: null };
-    let disc = 0, code = null;
+    const candidates = [];
 
     for (const r of rules) {
       if (!r.active) continue;
@@ -259,9 +284,10 @@
         if (t) {
           const sub = items.reduce((s, it) => s + (it.original_line_price || it.price * it.quantity), 0);
           const isFixed = t.discountType === "FIXED_AMOUNT";
-          const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue));
-          disc += isFixed ? Math.round(val * 100) : Math.round(sub * (val / 100));
-          if (!code) code = t.code || `${cleanCode(r.title)}-BUY${t.minQuantity}-${val}OFF`;
+          const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 0));
+          const disc = isFixed ? Math.round(val * 100) : Math.round(sub * (val / 100));
+          const code = t.code || `${cleanCode(r.title)}-BUY${t.minQuantity}-${val}OFF`;
+          candidates.push({ disc, code, type: "VOLUME" });
         }
       } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
         const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
@@ -273,9 +299,10 @@
           const bundleCount = Math.min(targetItem.quantity, ...companionItems.map((it) => it?.quantity || 1));
           const isFixed = r.discountType === "FIXED_AMOUNT";
           const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
+          let disc = 0;
 
           if (isFixed) {
-            disc += Math.round(bundleCount * val * 100);
+            disc = Math.round(bundleCount * val * 100);
           } else {
             const bp = Number(r.mainDiscountPercent || val || 0);
             const targetUnit = Math.round((targetItem.original_line_price || targetItem.price * targetItem.quantity) / targetItem.quantity);
@@ -288,11 +315,17 @@
               disc += Math.round(unit * bundleCount * (cp / 100));
             });
           }
-          if (!code) code = r.discountCode || `BUNDLE-${cleanCode(r.title)}-${val}OFF`;
+          const code = r.discountCode || `BUNDLE-${cleanCode(r.title)}-${val}OFF`;
+          candidates.push({ disc, code, type: "FBT" });
         }
       }
     }
-    return { disc, code };
+
+    if (!candidates.length) return { disc: 0, code: null };
+
+    // Max Savings Resolution: Whichever discount yields the HIGHER discount is awarded!
+    candidates.sort((a, b) => b.disc - a.disc);
+    return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
   // 5. UPDATE ESTIMATED TOTAL WITH STRIKETHROUGH IN DRAWER
@@ -399,11 +432,230 @@
     } catch {}
   }
 
-  // 6. PDP HYDRATION
+  // 6. PDP HYDRATION & DYNAMIC INJECTION
+  let pdpInjected = false;
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
-    $$(".bt-volume-widget").forEach(initVolume);
-    $$(".bt-fbt-widget").forEach(initFbt);
+
+    const hasVol = $(".bt-volume-widget");
+    const hasFbt = $(".bt-fbt-widget");
+    if (hasVol) initVolume(hasVol);
+    if (hasFbt) initFbt(hasFbt);
+
+    if ((hasVol && hasFbt) || pdpInjected) return;
+    pdpInjected = true;
+
+    try {
+      const cfg = await getConfig();
+      const rules = cfg.rules || [];
+      const st = cfg.settings || {};
+      const tpl = st.template || "cards";
+
+      const pRes = await fetch(window.location.pathname.replace(/\/$/, "") + ".js");
+      if (!pRes.ok) return;
+      const prod = await pRes.json();
+      if (!prod?.id) return;
+
+      const pIdStr = String(prod.id);
+      const form = $('form[action*="/cart/add"]') || $(".product-form") || $("product-form");
+      if (!form) return;
+
+      const styleVars = `--bt-accent:${st.accentColor||"#008060"};--bt-bg:${st.bgColor||"#ffffff"};--bt-text:${st.textColor||"#1a1a1a"};--bt-border:${st.borderColor||"#e1e3e5"};--bt-badge-bg:${st.badgeBg||"#008060"};--bt-badge-text:${st.badgeText||"#ffffff"};--bt-font-size:${st.fontSize||"15px"};--bt-radius:${st.borderRadius||"8px"};`;
+
+      // Auto-inject Volume widget if missing
+      if (!hasVol) {
+        const vRule = rules.find((r) =>
+          r.active &&
+          r.ruleType === "VOLUME" &&
+          r.tiers?.length &&
+          (r.targetType === "PRODUCT"
+            ? String(r.targetGid).includes(pIdStr)
+            : (r.collectionProductIds || []).map(String).includes(pIdStr))
+        );
+
+        if (vRule) {
+          const basePrice = prod.price || prod.variants?.[0]?.price || 0;
+          const clean = cleanCode(vRule.title);
+          let cardsHtml = "";
+
+          vRule.tiers.forEach((t, i) => {
+            const minQ = t.minQuantity || 1;
+            const isF = t.discountType === "FIXED_AMOUNT";
+            const val = Number(isF ? t.discountValue : (t.discountPercent || t.discountValue || 0));
+            const origTot = basePrice * minQ;
+            const discTot = isF ? Math.max(0, origTot - Math.round(val * 100)) : Math.round(origTot * (100 - val) / 100);
+            const perItem = Math.round(discTot / minQ);
+            const code = t.code || `${clean}-BUY${minQ}-${val}OFF`;
+
+            cardsHtml += `
+              <div class="bt-tier-card ${i === 0 ? "is-selected" : ""}"
+                data-min-qty="${minQ}"
+                data-discount-type="${t.discountType || "PERCENTAGE"}"
+                data-discount-value="${val}"
+                data-discount="${isF ? 0 : val}"
+                data-code="${code}">
+                ${i === 1 && vRule.tiers.length > 2 ? '<span class="bt-tier-badge">Most Popular</span>' : ""}
+                <div class="bt-tier-radio-wrap">
+                  <input type="radio" name="bt-dyn-vol" class="bt-tier-radio" ${i === 0 ? "checked" : ""}>
+                  <div class="bt-tier-info">
+                    <span class="bt-tier-name">Buy ${minQ} &middot; Save ${isF ? "₹" + val : val + "%"}</span>
+                    <span class="bt-tier-per-item">${fmtPrice(perItem)}/each</span>
+                  </div>
+                </div>
+                <div class="bt-tier-pricing">
+                  <span class="bt-tier-price-current">${fmtPrice(discTot)}</span>
+                  ${val > 0 ? `<span class="bt-tier-price-compare">${fmtPrice(origTot)}</span>` : ""}
+                </div>
+              </div>`;
+          });
+
+          const volDiv = document.createElement("div");
+          volDiv.className = `bt-widget-container bt-volume-widget bt-template-${tpl}`;
+          volDiv.setAttribute("style", styleVars);
+          volDiv.dataset.variantId = String(prod.variants?.[0]?.id || "");
+          volDiv.dataset.productId = pIdStr;
+          volDiv.innerHTML = `
+            <div class="bt-widget-header">
+              <h3 class="bt-widget-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                  <line x1="7" y1="7" x2="7.01" y2="7"/>
+                </svg>
+                Buy More, Save More
+              </h3>
+              <p class="bt-widget-subtitle">Select a quantity bundle to unlock discounts</p>
+            </div>
+            <div class="bt-tiers-list">${cardsHtml}</div>
+            <div class="bt-action-wrap">
+              <button type="button" class="bt-add-btn">Add To Cart</button>
+              <div class="bt-savings-summary"></div>
+            </div>`;
+          form.parentNode.insertBefore(volDiv, form);
+          initVolume(volDiv);
+        }
+      }
+
+      // Auto-inject FBT widget if missing
+      if (!hasFbt) {
+        const fRule = rules.find((r) =>
+          r.active &&
+          r.ruleType === "FBT" &&
+          r.fbtProducts?.length &&
+          (String(r.targetGid).includes(pIdStr) ||
+           (r.fbtProducts || []).some((p) => String(p.productId).includes(pIdStr)))
+        );
+
+        if (fRule) {
+          const isTrigger = String(fRule.targetGid).includes(pIdStr);
+          const isF = fRule.discountType === "FIXED_AMOUNT";
+          const fVal = Number(fRule.discountValue ?? (fRule.mainDiscountPercent || 10));
+          const baseVId = String(prod.variants?.[0]?.id || "");
+          const baseP = prod.price || prod.variants?.[0]?.price || 0;
+          const clean = cleanCode(fRule.title);
+          const code = fRule.discountCode || `BUNDLE-${clean}-${fVal}OFF`;
+
+          let companions = [];
+          if (isTrigger) {
+            companions = fRule.fbtProducts;
+          } else {
+            if (fRule.triggerProduct) {
+              companions.push({
+                productId: fRule.triggerProduct.id,
+                variantId: fRule.triggerProduct.variantId,
+                title: fRule.triggerProduct.title,
+                priceCents: fRule.triggerProduct.priceCents,
+                image: fRule.triggerProduct.image,
+                discountPercent: fRule.mainDiscountPercent || fVal,
+              });
+            }
+            fRule.fbtProducts.forEach((cp) => {
+              if (!String(cp.productId).includes(pIdStr)) companions.push(cp);
+            });
+          }
+
+          let thumbsHtml = `
+            <div class="bt-fbt-thumb-card" data-fbt-card-id="${pIdStr}">
+              <div class="bt-fbt-thumb-wrap">
+                ${prod.featured_image ? `<img src="${prod.featured_image}" class="bt-fbt-img" width="80" height="80">` : `<div class="bt-fbt-no-img">${prod.title.slice(0, 10)}</div>`}
+              </div>
+              <span class="bt-fbt-thumb-badge">This Item</span>
+            </div>`;
+
+          let listHtml = `
+            <div class="bt-fbt-item-row is-base">
+              <label class="bt-fbt-checkbox-label">
+                <input type="checkbox" checked disabled class="bt-fbt-base-checkbox">
+                <span class="bt-fbt-item-name"><strong>This item:</strong> ${prod.title}</span>
+                <span class="bt-fbt-item-price">${fmtPrice(baseP)}</span>
+              </label>
+            </div>`;
+
+          companions.forEach((cp) => {
+            const cpId = String(cp.productId || "").replace(/\D/g, "");
+            const cpVId = String(cp.variantId || "").replace(/\D/g, "");
+            const cpPrice = cp.priceCents || 0;
+            const cpDisc = cp.discountPercent || fVal;
+
+            thumbsHtml += `
+              <div class="bt-fbt-plus-icon">+</div>
+              <div class="bt-fbt-thumb-card" data-fbt-card-id="${cpId}">
+                <div class="bt-fbt-thumb-wrap">
+                  ${cp.image ? `<img src="${cp.image}" class="bt-fbt-img" width="80" height="80">` : `<div class="bt-fbt-no-img">${(cp.title || "Item").slice(0, 10)}</div>`}
+                </div>
+                ${!isF && cpDisc > 0 ? `<span class="bt-fbt-thumb-badge">-${cpDisc}%</span>` : ""}
+              </div>`;
+
+            listHtml += `
+              <div class="bt-fbt-item-row">
+                <label class="bt-fbt-checkbox-label">
+                  <input type="checkbox" checked class="bt-fbt-companion-checkbox"
+                    data-product-id="${cpId}"
+                    data-variant-id="${cpVId}"
+                    data-price="${cpPrice}"
+                    data-discount="${cpDisc}">
+                  <span class="bt-fbt-item-name">${cp.title || "Companion Item"}</span>
+                  <span class="bt-fbt-item-price">${fmtPrice(cpPrice)}</span>
+                </label>
+              </div>`;
+          });
+
+          const fbtDiv = document.createElement("div");
+          fbtDiv.className = `bt-widget-container bt-fbt-widget bt-template-${tpl}`;
+          fbtDiv.setAttribute("style", styleVars);
+          fbtDiv.dataset.baseVariantId = baseVId;
+          fbtDiv.dataset.basePrice = String(baseP);
+          fbtDiv.dataset.baseDiscount = String(fRule.mainDiscountPercent || 0);
+          fbtDiv.dataset.discountType = fRule.discountType || "PERCENTAGE";
+          fbtDiv.dataset.discountValue = String(fVal);
+          fbtDiv.dataset.baseTitle = prod.title;
+          fbtDiv.dataset.code = code;
+          fbtDiv.innerHTML = `
+            <div class="bt-widget-header">
+              <h3 class="bt-widget-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+                  <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+                </svg>
+                Frequently Bought Together
+              </h3>
+              <p class="bt-widget-subtitle">Bundle these items together and save</p>
+            </div>
+            <div class="bt-fbt-gallery">${thumbsHtml}</div>
+            <div class="bt-fbt-items-list">${listHtml}</div>
+            <div class="bt-fbt-action-wrap">
+              <div class="bt-fbt-pricing-summary">
+                <span class="bt-fbt-total-label">Total price:</span>
+                <span class="bt-fbt-bundle-price"></span>
+                <span class="bt-fbt-bundle-compare"></span>
+                <span class="bt-fbt-savings-note"></span>
+              </div>
+              <button type="button" class="bt-fbt-add-btn">Add Items To Cart</button>
+            </div>`;
+          form.parentNode.insertBefore(fbtDiv, form.nextSibling);
+          initFbt(fbtDiv);
+        }
+      }
+    } catch {}
   }
 
   // 7. OBSERVER & INTERCEPTOR

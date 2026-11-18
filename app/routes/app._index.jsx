@@ -18,6 +18,26 @@ export const loader = async ({ request }) => {
     rawRules = [];
   }
 
+  const settingsRule = rawRules.find((r) => r.targetType === "SETTINGS");
+  let widgetSettings = {
+    template: "cards",
+    accentColor: "#008060",
+    bgColor: "#ffffff",
+    textColor: "#1a1a1a",
+    borderColor: "#e1e3e5",
+    badgeBg: "#008060",
+    badgeText: "#ffffff",
+    fontSize: "15px",
+    borderRadius: "8px",
+  };
+  if (settingsRule) {
+    try {
+      widgetSettings = { ...widgetSettings, ...JSON.parse(settingsRule.tiers || "{}") };
+    } catch {}
+  }
+
+  const discountRules = rawRules.filter((r) => r.targetType !== "SETTINGS");
+
   // Auto-sync metafields and automatic discount node on every load so Shopify is always up to date
   let discountStatus = "UNKNOWN";
   try {
@@ -29,7 +49,8 @@ export const loader = async ({ request }) => {
 
   return {
     discountStatus,
-    rules: rawRules.map((r) => {
+    settings: widgetSettings,
+    rules: discountRules.map((r) => {
       let parsedTiers = [];
       try {
         parsedTiers = JSON.parse(r.tiers || "[]");
@@ -208,6 +229,29 @@ export const action = async ({ request }) => {
           data: { active: !current },
         });
       }
+    } else if (intent === "save_widget_settings") {
+      const settingsStr = formData.get("settings") || "{}";
+      const existingSettings = await prisma.bundleRule.findFirst({
+        where: { shop: session.shop, targetType: "SETTINGS" },
+      });
+      if (existingSettings) {
+        await prisma.bundleRule.update({
+          where: { id: existingSettings.id },
+          data: { tiers: settingsStr },
+        });
+      } else {
+        await prisma.bundleRule.create({
+          data: {
+            shop: session.shop,
+            title: "WIDGET_SETTINGS",
+            targetType: "SETTINGS",
+            targetGid: "gid://shopify/Settings/Widget",
+            tiers: settingsStr,
+            fbtProducts: "[]",
+            active: true,
+          },
+        });
+      }
     } else if (intent === "delete_rule") {
       const id = formData.get("id");
       if (id) {
@@ -237,7 +281,27 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       where: { shop, active: true },
     });
 
-    const activeRulesPayload = activeRules.map((r) => {
+    let widgetSettings = {
+      template: "cards",
+      accentColor: "#008060",
+      bgColor: "#ffffff",
+      textColor: "#1a1a1a",
+      borderColor: "#e1e3e5",
+      badgeBg: "#008060",
+      badgeText: "#ffffff",
+      fontSize: "15px",
+      borderRadius: "8px",
+    };
+    const settingsRule = activeRules.find((r) => r.targetType === "SETTINGS");
+    if (settingsRule) {
+      try {
+        widgetSettings = { ...widgetSettings, ...JSON.parse(settingsRule.tiers || "{}") };
+      } catch {}
+    }
+
+    const discountRules = activeRules.filter((r) => r.targetType !== "SETTINGS");
+
+    const activeRulesPayload = discountRules.map((r) => {
       let parsedTiers = [];
       try {
         parsedTiers = JSON.parse(r.tiers || "[]");
@@ -283,10 +347,10 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
     // Fetch products for each collection rule to enable instant storefront cart splitting
     for (const rule of activeRulesPayload) {
       const cleanName = rule.title
-        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+        .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
         .replace(/[^a-zA-Z0-9]/g, "")
         .toUpperCase()
-        .slice(0, 8) || "OFFER";
+        .slice(0, 8) || (rule.ruleType === "FBT" ? "BUNDLE" : "OFFER");
 
       const isFixed = rule.discountType === "FIXED_AMOUNT";
       const val = Number(isFixed ? rule.discountValue : (rule.mainDiscountPercent || rule.discountValue || rule.fbtProducts?.[0]?.discountPercent || 10));
@@ -360,6 +424,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
     const configPayload = {
       collectionIds,
       rules: activeRulesPayload,
+      settings: widgetSettings,
     };
 
     // 1. Fetch Shop GID
@@ -704,11 +769,31 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
 }
 
 export default function BundleTierIndex() {
-  const { rules, discountStatus } = useLoaderData();
+  const { rules, discountStatus, settings } = useLoaderData();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
 
-  const [activeTab, setActiveTab] = useState("volume"); // "volume" or "fbt"
+  const [activeTab, setActiveTab] = useState("volume"); // "volume", "fbt", "design"
+
+  // Widget Customization & Styling State
+  const [styling, setStyling] = useState({
+    template: settings?.template || "cards",
+    accentColor: settings?.accentColor || "#008060",
+    bgColor: settings?.bgColor || "#ffffff",
+    textColor: settings?.textColor || "#1a1a1a",
+    borderColor: settings?.borderColor || "#e1e3e5",
+    badgeBg: settings?.badgeBg || "#008060",
+    badgeText: settings?.badgeText || "#ffffff",
+    fontSize: settings?.fontSize || "15px",
+    borderRadius: settings?.borderRadius || "8px",
+  });
+
+  const handleSaveStyling = () => {
+    const fd = new FormData();
+    fd.append("intent", "save_widget_settings");
+    fd.append("settings", JSON.stringify(styling));
+    fetcher.submit(fd, { method: "POST" });
+  };
 
   // Volume Modal State - TIERS ARE EMPTY BY DEFAULT
   const [isVolumeModalOpen, setIsVolumeModalOpen] = useState(false);
@@ -1066,6 +1151,23 @@ export default function BundleTierIndex() {
           >
             Frequently Bought Together ({fbtRules.length})
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("design")}
+            style={{
+              padding: "8px 16px",
+              borderRadius: "6px",
+              fontWeight: 600,
+              fontSize: "0.95rem",
+              border: "none",
+              cursor: "pointer",
+              backgroundColor: activeTab === "design" ? "#008060" : "#f1f2f3",
+              color: activeTab === "design" ? "#ffffff" : "#202223",
+              transition: "all 0.2s ease",
+            }}
+          >
+            Widget Styling &amp; Templates 🎨
+          </button>
         </div>
 
         {/* ---------------- TAB 1: VOLUME DISCOUNTS ---------------- */}
@@ -1106,7 +1208,7 @@ export default function BundleTierIndex() {
                   <s-table-body>
                     {volumeRules.map((rule) => {
                       const cleanName = rule.title
-                        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+                        .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
                         .replace(/[^a-zA-Z0-9]/g, "")
                         .toUpperCase()
                         .slice(0, 8) || "OFFER";
@@ -1132,8 +1234,26 @@ export default function BundleTierIndex() {
                                       {t.minQuantity}+ ({isFixed ? `₹${val}` : `${val}%`} OFF)
                                     </s-badge>
                                     <span style={{ fontSize: "0.75rem", fontFamily: "monospace", background: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#202223" }}>
-                                      Code: {code}
+                                      {code}
                                     </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        navigator.clipboard.writeText(code);
+                                        shopify?.toast?.show(`Copied ${code}!`);
+                                      }}
+                                      style={{
+                                        cursor: "pointer",
+                                        background: "#fff",
+                                        border: "1px solid #ccc",
+                                        borderRadius: "4px",
+                                        padding: "1px 6px",
+                                        fontSize: "0.7rem",
+                                        fontWeight: 600,
+                                      }}
+                                    >
+                                      📋 Copy
+                                    </button>
                                   </div>
                                 );
                               })}
@@ -1213,7 +1333,7 @@ export default function BundleTierIndex() {
                   <s-table-body>
                     {fbtRules.map((rule) => {
                       const cleanName = rule.title
-                        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+                        .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
                         .replace(/[^a-zA-Z0-9]/g, "")
                         .toUpperCase()
                         .slice(0, 8) || "BUNDLE";
@@ -1240,9 +1360,29 @@ export default function BundleTierIndex() {
                                   </s-badge>
                                 ))}
                               </div>
-                              <span style={{ fontSize: "0.75rem", fontFamily: "monospace", background: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#202223" }}>
-                                Shiprocket Code: {code}
-                              </span>
+                              <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span style={{ fontSize: "0.75rem", fontFamily: "monospace", background: "#f1f2f4", padding: "2px 6px", borderRadius: "4px", color: "#202223" }}>
+                                  {code}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(code);
+                                    shopify?.toast?.show(`Copied ${code}!`);
+                                  }}
+                                  style={{
+                                    cursor: "pointer",
+                                    background: "#fff",
+                                    border: "1px solid #ccc",
+                                    borderRadius: "4px",
+                                    padding: "1px 6px",
+                                    fontSize: "0.7rem",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  📋 Copy
+                                </button>
+                              </div>
                             </s-stack>
                           </s-table-cell>
                           <s-table-cell>
@@ -1279,6 +1419,187 @@ export default function BundleTierIndex() {
               </s-section>
             )}
           </>
+        )}
+
+        {/* ---------------- TAB 3: WIDGET DESIGN & TEMPLATES ---------------- */}
+        {activeTab === "design" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: "#fff", padding: "16px 20px", borderRadius: "10px", border: "1px solid #e1e3e5" }}>
+              <div>
+                <h2 style={{ margin: "0 0 4px 0", fontSize: "1.15rem", fontWeight: 700 }}>Widget Layout Templates &amp; Styling</h2>
+                <p style={{ margin: 0, fontSize: "0.85rem", color: "#666" }}>
+                  Select from 5 UI templates and customize colors and fonts. Changes sync directly to the PDP widgets!
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleSaveStyling}
+                disabled={fetcher.state === "submitting"}
+                style={{
+                  padding: "10px 20px",
+                  backgroundColor: "#008060",
+                  color: "#fff",
+                  fontWeight: 700,
+                  fontSize: "0.95rem",
+                  borderRadius: "8px",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+              >
+                {fetcher.state === "submitting" ? "Saving..." : "Save & Sync Styling"}
+              </button>
+            </div>
+
+            {/* Template Selector Cards */}
+            <div style={{ backgroundColor: "#fff", padding: "20px", borderRadius: "10px", border: "1px solid #e1e3e5" }}>
+              <h3 style={{ margin: "0 0 12px 0", fontSize: "1rem", fontWeight: 700 }}>1. Choose Widget Layout Template</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
+                {[
+                  { id: "cards", name: "Modern Cards", desc: "Classic vertical cards with radio buttons, badges & strikethrough price." },
+                  { id: "minimal", name: "Minimalist List", desc: "Clean, flat horizontal rows with soft borders for clean luxury look." },
+                  { id: "grid", name: "Grid Boxes", desc: "Multi-column side-by-side grid boxes with bold savings on top." },
+                  { id: "pills", name: "Pill Selector", desc: "Clickable rounded pills for instant 1-click quantity selection." },
+                  { id: "banner", name: "Tier Banner", desc: "Prominent featured offer with high-contrast active highlight." },
+                ].map((t) => (
+                  <div
+                    key={t.id}
+                    onClick={() => setStyling({ ...styling, template: t.id })}
+                    style={{
+                      border: styling.template === t.id ? `2px solid #008060` : "1px solid #d2d5d8",
+                      backgroundColor: styling.template === t.id ? "#f0f8f5" : "#fafbfb",
+                      borderRadius: "8px",
+                      padding: "14px",
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                      <strong style={{ fontSize: "0.95rem", color: styling.template === t.id ? "#008060" : "#202223" }}>{t.name}</strong>
+                      <input
+                        type="radio"
+                        name="widgetTemplate"
+                        checked={styling.template === t.id}
+                        onChange={() => setStyling({ ...styling, template: t.id })}
+                      />
+                    </div>
+                    <p style={{ margin: 0, fontSize: "0.8rem", color: "#666", lineHeight: 1.4 }}>{t.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Color & Typography Controls */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+              {/* Colors */}
+              <div style={{ backgroundColor: "#fff", padding: "20px", borderRadius: "10px", border: "1px solid #e1e3e5" }}>
+                <h3 style={{ margin: "0 0 14px 0", fontSize: "1rem", fontWeight: 700 }}>2. Colors &amp; Accents</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  {[
+                    { key: "accentColor", label: "Primary Accent (Buttons & Active borders)" },
+                    { key: "bgColor", label: "Widget Background Color" },
+                    { key: "textColor", label: "Text / Heading Color" },
+                    { key: "borderColor", label: "Card & Row Border Color" },
+                    { key: "badgeBg", label: "Badge / Savings Pill Background" },
+                    { key: "badgeText", label: "Badge Text Color" },
+                  ].map((c) => (
+                    <div key={c.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: "0.85rem", fontWeight: 600 }}>{c.label}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <input
+                          type="color"
+                          value={styling[c.key]}
+                          onChange={(e) => setStyling({ ...styling, [c.key]: e.target.value })}
+                          style={{ width: "36px", height: "30px", border: "none", cursor: "pointer", background: "none" }}
+                        />
+                        <input
+                          type="text"
+                          value={styling[c.key]}
+                          onChange={(e) => setStyling({ ...styling, [c.key]: e.target.value })}
+                          style={{ width: "80px", padding: "4px 8px", fontSize: "0.85rem", border: "1px solid #ccc", borderRadius: "4px" }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Typography & Sizing */}
+              <div style={{ backgroundColor: "#fff", padding: "20px", borderRadius: "10px", border: "1px solid #e1e3e5" }}>
+                <h3 style={{ margin: "0 0 14px 0", fontSize: "1rem", fontWeight: 700 }}>3. Sizing &amp; Geometry</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "6px" }}>Font Size</label>
+                    <select
+                      value={styling.fontSize}
+                      onChange={(e) => setStyling({ ...styling, fontSize: e.target.value })}
+                      style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid #ccc" }}
+                    >
+                      <option value="13px">Small (13px)</option>
+                      <option value="15px">Regular / Medium (15px) - Recommended</option>
+                      <option value="17px">Large (17px)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, marginBottom: "6px" }}>Corner Radius (Border Radius)</label>
+                    <select
+                      value={styling.borderRadius}
+                      onChange={(e) => setStyling({ ...styling, borderRadius: e.target.value })}
+                      style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid #ccc" }}
+                    >
+                      <option value="0px">Sharp Corners (0px)</option>
+                      <option value="6px">Slightly Rounded (6px)</option>
+                      <option value="10px">Medium Rounded (10px) - Recommended</option>
+                      <option value="20px">Pill / Extra Rounded (20px)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Live Preview Inside Styling Tab */}
+                <div style={{ marginTop: "20px", borderTop: "1px solid #eee", paddingTop: "14px" }}>
+                  <span style={{ fontSize: "0.85rem", fontWeight: 700, color: "#666" }}>Live Preview:</span>
+                  <div
+                    style={{
+                      marginTop: "8px",
+                      padding: "14px",
+                      backgroundColor: styling.bgColor,
+                      border: `1px solid ${styling.borderColor}`,
+                      borderRadius: styling.borderRadius,
+                      color: styling.textColor,
+                      fontSize: styling.fontSize,
+                    }}
+                  >
+                    <div style={{ fontWeight: 700, marginBottom: "8px" }}>Buy More, Save More (Preview)</div>
+                    <div
+                      style={{
+                        padding: "8px 12px",
+                        border: `2px solid ${styling.accentColor}`,
+                        borderRadius: styling.borderRadius,
+                        backgroundColor: "#f6fbf9",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                      }}
+                    >
+                      <span>Buy 2 &middot; Save 10%</span>
+                      <span
+                        style={{
+                          backgroundColor: styling.badgeBg,
+                          color: styling.badgeText,
+                          fontSize: "0.75rem",
+                          fontWeight: 700,
+                          padding: "2px 8px",
+                          borderRadius: "4px",
+                        }}
+                      >
+                        Popular
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </s-stack>
 

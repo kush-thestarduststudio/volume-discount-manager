@@ -14,6 +14,17 @@
   {% assign config_data = shop.metafields.bundle_tiers.config %}
 {% endif %}
 
+{% assign st = config_data.settings %}
+{% assign widget_template = st.template | default: 'cards' %}
+{% assign accent_color = st.accentColor | default: '#008060' %}
+{% assign bg_color = st.bgColor | default: '#ffffff' %}
+{% assign text_color = st.textColor | default: '#1a1a1a' %}
+{% assign border_color = st.borderColor | default: '#e1e3e5' %}
+{% assign badge_bg = st.badgeBg | default: '#008060' %}
+{% assign badge_text = st.badgeText | default: '#ffffff' %}
+{% assign font_size = st.fontSize | default: '15px' %}
+{% assign border_radius = st.borderRadius | default: '8px' %}
+
 {% assign current_product_id_str = product.id | append: '' %}
 {% assign matched_product_volume_rule = nil %}
 {% assign matched_collection_volume_rule = nil %}
@@ -196,11 +207,20 @@
   </style>
 
   <div
-    class="bt-widget-container bt-volume-widget"
+    class="bt-widget-container bt-volume-widget bt-template-{{ widget_template }}"
     id="bt-volume-widget-{{ block.id }}"
     data-variant-id="{{ product.selected_or_first_available_variant.id }}"
     data-product-id="{{ product.id }}"
-    style="--bt-accent: {{ block.settings.accent_color | default: '#008060' }};"
+    style="
+      --bt-accent: {{ accent_color }};
+      --bt-bg: {{ bg_color }};
+      --bt-text: {{ text_color }};
+      --bt-border: {{ border_color }};
+      --bt-badge-bg: {{ badge_bg }};
+      --bt-badge-text: {{ badge_text }};
+      --bt-font-size: {{ font_size }};
+      --bt-radius: {{ border_radius }};
+    "
   >
     <div class="bt-widget-header">
       <h3 class="bt-widget-title">
