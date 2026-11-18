@@ -389,15 +389,18 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       const expectedDiscounts = [];
 
       for (const rule of activeRulesPayload) {
-        const cleanSlug =
-          rule.title.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8) || "OFFER";
+        const cleanName = rule.title
+          .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+          .replace(/[^a-zA-Z0-9]/g, "")
+          .toUpperCase()
+          .slice(0, 8) || "OFFER";
 
         if (rule.ruleType === "VOLUME" && Array.isArray(rule.tiers) && rule.tiers.length > 0) {
           for (const tier of rule.tiers) {
             if (tier.minQuantity > 0 && tier.discountPercent > 0) {
               const autoTitle = `[Volume] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`;
               const codeTitle = `[Volume Code] ${rule.title} - ${tier.minQuantity}+ (${tier.discountPercent}% OFF)`;
-              const code = `${cleanSlug}-BUY${tier.minQuantity}-${tier.discountPercent}OFF`;
+              const code = `${cleanName}-BUY${tier.minQuantity}-${tier.discountPercent}OFF`;
 
               expectedDiscounts.push({
                 type: "VOLUME",
@@ -425,7 +428,7 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
 
           const autoTitle = `[Bundle] ${rule.title} (${bundleDiscountPct}% OFF)`;
           const codeTitle = `[Bundle Code] ${rule.title} (${bundleDiscountPct}% OFF)`;
-          const code = `BUNDLE-${cleanSlug}-${bundleDiscountPct}OFF`;
+          const code = `BUNDLE-${cleanName}-${bundleDiscountPct}OFF`;
 
           expectedDiscounts.push({
             type: "FBT",
@@ -537,9 +540,12 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         }
 
         // 2. Code Discount (For Shiprocket Fastrr 1-Click Import)
-        const codeExists = existingAppDiscounts.some(
-          (n) => n.discount?.__typename === "DiscountCodeBasic" && n.discount?.title === exp.codeTitle
-        );
+        const codeExists = existingAppDiscounts.some((n) => {
+          if (n.discount?.__typename !== "DiscountCodeBasic") return false;
+          if (n.discount?.title === exp.codeTitle) return true;
+          const codes = (n.discount?.codes?.nodes || []).map((c) => c.code);
+          return codes.includes(exp.code);
+        });
 
         if (codeExists) {
           activeCodeCount++;
@@ -559,6 +565,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                   title: exp.codeTitle,
                   code: exp.code,
                   startsAt: new Date().toISOString(),
+                  customerSelection: {
+                    all: true,
+                  },
                   customerGets: {
                     value: { percentage: Number(exp.discountPercent) / 100 },
                     items:
@@ -581,7 +590,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
           const codeJson = await createCodeRes.json();
           const codeErrors = codeJson?.data?.discountCodeBasicCreate?.userErrors;
           if (codeErrors && codeErrors.length > 0) {
-            console.warn("[CodeDiscountSync] Warning:", codeErrors.map((e) => e.message).join(", "));
+            const errStr = codeErrors.map((e) => `${e.field?.join(".") || ""}: ${e.message}`).join(", ");
+            console.error("[CodeDiscountSync] Error:", errStr);
+            lastErrorMessage = `Code Discount (${exp.code}): ${errStr}`;
           } else {
             activeCodeCount++;
           }
@@ -866,12 +877,10 @@ export default function BundleTierIndex() {
         {discountStatus && (
           <s-banner
             tone={discountStatus.startsWith("ACTIVE") ? "success" : "warning"}
-            heading={discountStatus.startsWith("ACTIVE") ? "Shopify Automatic Discounts: Active" : "Shopify Discounts Status"}
+            heading={discountStatus.startsWith("ACTIVE") ? "Shopify Discounts Status: Active" : "Shopify Discounts Status"}
           >
             <s-text>
-              {discountStatus.startsWith("ACTIVE")
-                ? "Discounts are registered with Shopify Functions and active on cart & checkout."
-                : discountStatus}
+              {discountStatus}
             </s-text>
           </s-banner>
         )}
@@ -950,7 +959,11 @@ export default function BundleTierIndex() {
                   </s-table-header-row>
                   <s-table-body>
                     {volumeRules.map((rule) => {
-                      const cleanSlug = rule.title.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8) || "OFFER";
+                      const cleanName = rule.title
+                        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+                        .replace(/[^a-zA-Z0-9]/g, "")
+                        .toUpperCase()
+                        .slice(0, 8) || "OFFER";
                       return (
                         <s-table-row key={rule.id}>
                           <s-table-cell>
@@ -964,7 +977,7 @@ export default function BundleTierIndex() {
                           <s-table-cell>
                             <s-stack direction="block" gap="extra-tight">
                               {rule.tiers.map((t, i) => {
-                                const code = `${cleanSlug}-BUY${t.minQuantity}-${t.discountPercent}OFF`;
+                                const code = `${cleanName}-BUY${t.minQuantity}-${t.discountPercent}OFF`;
                                 return (
                                   <div key={i} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
                                     <s-badge tone="success">
@@ -1051,9 +1064,13 @@ export default function BundleTierIndex() {
                   </s-table-header-row>
                   <s-table-body>
                     {fbtRules.map((rule) => {
-                      const cleanSlug = rule.title.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8) || "BUNDLE";
+                      const cleanName = rule.title
+                        .replace(/^(bundle for:\s*|volume tier:\s*|collection tier:\s*)/i, "")
+                        .replace(/[^a-zA-Z0-9]/g, "")
+                        .toUpperCase()
+                        .slice(0, 8) || "BUNDLE";
                       const bundlePct = Number(rule.mainDiscountPercent) > 0 ? Number(rule.mainDiscountPercent) : Number(rule.fbtProducts[0]?.discountPercent) || 10;
-                      const code = `BUNDLE-${cleanSlug}-${bundlePct}OFF`;
+                      const code = `BUNDLE-${cleanName}-${bundlePct}OFF`;
                       return (
                         <s-table-row key={rule.id}>
                           <s-table-cell>
