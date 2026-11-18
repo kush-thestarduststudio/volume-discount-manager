@@ -14,19 +14,68 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
+  // Access all DOM roots including Shiprocket Smart Cart Shadow DOM
+  function getRoots() {
+    const roots = [document];
+    try {
+      const srHost = document.querySelector('[data-app="shiprocket-smart-cart"], #shiprocket-smart-cart, shiprocket-smart-cart');
+      if (srHost?.shadowRoot && !roots.includes(srHost.shadowRoot)) {
+        roots.push(srHost.shadowRoot);
+      }
+      document.querySelectorAll("*").forEach((el) => {
+        if (el.shadowRoot && !roots.includes(el.shadowRoot)) {
+          roots.push(el.shadowRoot);
+        }
+      });
+    } catch {}
+    return roots;
+  }
+
+  // Open Shiprocket Smart Cart Drawer
+  function openShiprocketDrawer() {
+    try {
+      window.updateMiniCartSection?.();
+    } catch {}
+    try {
+      if (typeof window.slideShiprocketSmartCartInFrame === "function") {
+        window.slideShiprocketSmartCartInFrame();
+      }
+    } catch {}
+    try {
+      if (typeof window.srShowMiniCartDrawer === "function") {
+        window.srShowMiniCartDrawer();
+      }
+    } catch {}
+    try {
+      const cartBtn = document.querySelector('a[href="/cart"], .header__icon--cart, .cart-icon, #cart-icon-bubble, [data-open-cart]');
+      cartBtn?.click?.();
+    } catch {}
+    try {
+      const srContainer = document.getElementById("shiprocket-mini-cart-container");
+      if (srContainer) {
+        srContainer.style.display = "block";
+        document.body.classList.add("srsc-overflow-hidden");
+      }
+      const backdrop = document.querySelector(".sr-backdrop, #shiprocket-mini-cart-backdrop");
+      if (backdrop) backdrop.style.display = "block";
+    } catch {}
+    try {
+      document.querySelector("cart-drawer")?.open?.();
+    } catch {}
+  }
+
   function triggerRefresh() {
-    ["cart:refresh", "cart:updated"].forEach((n) => {
+    ["cart:refresh", "cart:updated", "shopify:cart:refresh"].forEach((n) => {
       const e = new CustomEvent(n, { bubbles: true });
       window.dispatchEvent(e);
       document.dispatchEvent(e);
     });
     try {
+      window.updateMiniCartSection?.();
       window.Shiprocket?.refreshCart?.();
       window.Fastrr?.refresh?.();
       window.Fastrr?.cart?.refresh?.();
     } catch {}
-    const d = $("cart-drawer");
-    d?.renderContents && fetch(ROOT + "?sections=cart-drawer,cart-icon-bubble").then((r) => r.json()).then((s) => { d.renderContents({ sections: s }); d.open?.(); }).catch(() => {});
   }
 
   function syncQty(qty) {
@@ -34,22 +83,12 @@
     inp && (inp.value = String(qty), inp.dispatchEvent(new Event("change", { bubbles: true })));
   }
 
-  // 1. APPLY DISCOUNT DIRECTLY TO SHOPIFY CART (SELLEASY APPROACH)
+  // Preapply code for checkout session while preserving manual coupons
   let lastAppliedCode = null;
-  let isApplyingDiscount = false;
-
-  async function applyCartDiscount(code) {
-    if (code === lastAppliedCode || isApplyingDiscount) return;
-    isApplyingDiscount = true;
+  function preapply(code) {
+    if (code === lastAppliedCode) return;
     lastAppliedCode = code;
-
     try {
-      await fetch(ROOT + "cart/update.js", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ discount: code || "" }),
-      });
-
       if (code) {
         fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
         document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
@@ -67,63 +106,96 @@
         document.cookie = "fastrrCouponCode=; path=/; max-age=0";
         try { localStorage.removeItem("fastrrCouponCode"); } catch {}
         try { sessionStorage.removeItem("fastrrCouponCode"); } catch {}
-        try { localStorage.removeItem("discount_code"); } catch {}
       }
-
-      triggerRefresh();
-    } catch (e) {
-      console.error("[BundleTier] Error updating cart discount:", e);
-    } finally {
-      isApplyingDiscount = false;
-    }
+    } catch {}
   }
 
-  // 2. ESTIMATED TOTAL STRIKETHROUGH & FINAL PRICE IN SHIPROCKET DRAWER
+  // 1. ESTIMATED TOTAL STRIKETHROUGH & FINAL PRICE IN SHIPROCKET SHADOW DOM
   let activeFinalCents = 0;
   let activeOrigCents = 0;
   let totalTimer = null;
+  const observedRoots = new Set();
 
   function updateEstimatedTotal(finalCents, origCents) {
     if (!finalCents || !origCents || finalCents >= origCents) return;
     const finalStr = fmtPrice(finalCents);
     const origStr = fmtPrice(origCents);
 
-    // 1. Direct update to Shiprocket Smart Cart designated elements
-    const origEls = $$(".summary-original-price, [class*='summary-original-price']");
-    const totalEls = $$(".total-price, [class*='total-price']");
+    const roots = getRoots();
+    roots.forEach((root) => {
+      // 1. Direct update to Shiprocket Smart Cart designated elements inside this root
+      const totalEls = Array.from(root.querySelectorAll(".total-price, [class*='total-price']"));
+      const origEls = Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']"));
+      const subTotalEls = Array.from(root.querySelectorAll(".sr-sub-total"));
 
-    let updated = false;
-    totalEls.forEach((el) => {
-      if (el.closest(".sr-smart-cart-total, .sr-cart-buy-section, .sr-cart-total-price-amount, [class*='smart-cart']")) {
-        el.textContent = finalStr;
-        updated = true;
-      }
-    });
+      totalEls.forEach((el) => {
+        if (el.textContent !== finalStr) {
+          el.textContent = finalStr;
+        }
+      });
 
-    origEls.forEach((el) => {
-      el.textContent = origStr;
-      el.style.display = "inline-block";
-      el.style.textDecoration = "line-through";
-      el.style.marginRight = "6px";
-      updated = true;
-    });
+      origEls.forEach((el) => {
+        if (el.textContent !== origStr) {
+          el.textContent = origStr;
+        }
+        if (el.style.display !== "inline-block") el.style.display = "inline-block";
+        if (el.style.textDecoration !== "line-through") el.style.textDecoration = "line-through";
+        if (el.style.marginRight !== "6px") el.style.marginRight = "6px";
+        if (el.style.color !== "#9ca3af") el.style.color = "#9ca3af";
+      });
 
-    // 2. Generic fallback: check any label with "Estimated Total"
-    $$("*").forEach((lbl) => {
-      if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
-        const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
-        if (container) {
-          const priceEls = Array.from(container.querySelectorAll("*")).filter(
-            (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
-          );
-          if (priceEls.length === 1 && priceEls[0].textContent !== finalStr) {
-            priceEls[0].innerHTML = `<s style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span>${finalStr}</span>`;
-          } else if (priceEls.length >= 2) {
-            priceEls[0].textContent = origStr;
-            priceEls[0].style.display = "inline-block";
-            priceEls[priceEls.length - 1].textContent = finalStr;
+      subTotalEls.forEach((el) => {
+        if (el.textContent !== finalStr) {
+          el.textContent = finalStr;
+        }
+      });
+
+      // 2. Generic fallback: check any label with "Estimated Total" inside this root
+      Array.from(root.querySelectorAll("*")).forEach((lbl) => {
+        if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
+          const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
+          if (container) {
+            const priceEls = Array.from(container.querySelectorAll("*")).filter(
+              (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
+            );
+            if (priceEls.length === 1 && !priceEls[0].textContent.includes(finalStr)) {
+              priceEls[0].innerHTML = `<s style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span>${finalStr}</span>`;
+            } else if (priceEls.length >= 2) {
+              if (priceEls[0].textContent !== origStr) priceEls[0].textContent = origStr;
+              if (priceEls[0].style.display !== "inline-block") priceEls[0].style.display = "inline-block";
+              if (priceEls[priceEls.length - 1].textContent !== finalStr) priceEls[priceEls.length - 1].textContent = finalStr;
+            }
           }
         }
+      });
+    });
+  }
+
+  let obsTimer = null;
+  const observer = new MutationObserver(() => {
+    attachObservers();
+    if (!activeFinalCents || obsTimer) return;
+    obsTimer = setTimeout(() => {
+      obsTimer = null;
+      if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
+        updateEstimatedTotal(activeFinalCents, activeOrigCents);
+      }
+    }, 60);
+  });
+
+  function attachObservers() {
+    getRoots().forEach((r) => {
+      if (!observedRoots.has(r)) {
+        observedRoots.add(r);
+        try {
+          observer.observe(r, { childList: true, subtree: true, characterData: true });
+        } catch {}
+        try {
+          r.addEventListener("click", () => {
+            setTimeout(syncCartDiscount, 300);
+            setTimeout(syncCartDiscount, 700);
+          }, true);
+        } catch {}
       }
     });
   }
@@ -133,26 +205,30 @@
     activeOrigCents = origCents;
     if (!finalCents || !origCents || finalCents >= origCents) return;
 
+    attachObservers();
     updateEstimatedTotal(finalCents, origCents);
+
     if (totalTimer) clearInterval(totalTimer);
-    let ticks = 0;
     totalTimer = setInterval(() => {
+      attachObservers();
       if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
         updateEstimatedTotal(activeFinalCents, activeOrigCents);
       }
-      ticks++;
-      if (ticks > 40) clearInterval(totalTimer);
-    }, 150);
+    }, 250);
   }
 
   function clearDrawerEstimatedTotal() {
     activeFinalCents = 0;
     activeOrigCents = 0;
     if (totalTimer) clearInterval(totalTimer);
-    $$(".summary-original-price").forEach((el) => (el.style.display = "none"));
+    getRoots().forEach((root) => {
+      Array.from(root.querySelectorAll(".summary-original-price")).forEach((el) => {
+        el.style.display = "none";
+      });
+    });
   }
 
-  // 3. VOLUME WIDGET INITIALIZATION
+  // 2. VOLUME WIDGET INITIALIZATION
   function initVolume(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -212,11 +288,12 @@
           });
           if (!res.ok) throw new Error();
 
-          if (sel?.code) {
-            await applyCartDiscount(sel.code);
-          }
           btn.textContent = "✓ Added!";
           triggerRefresh();
+          openShiprocketDrawer();
+          setTimeout(openShiprocketDrawer, 200);
+          setTimeout(openShiprocketDrawer, 500);
+          setTimeout(syncCartDiscount, 350);
           setTimeout(() => { btn.disabled = false; render(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -228,7 +305,7 @@
     render();
   }
 
-  // 4. FBT WIDGET INITIALIZATION
+  // 3. FBT WIDGET INITIALIZATION
   function initFbt(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -305,12 +382,12 @@
           });
           if (!res.ok) throw new Error();
 
-          const bundleCode = wrap.dataset.code;
-          if (bundleCode && items.length > 1) {
-            await applyCartDiscount(bundleCode);
-          }
           btn.textContent = "✓ Added Bundle!";
           triggerRefresh();
+          openShiprocketDrawer();
+          setTimeout(openShiprocketDrawer, 200);
+          setTimeout(openShiprocketDrawer, 500);
+          setTimeout(syncCartDiscount, 350);
           setTimeout(() => { btn.disabled = false; calc(); }, 1500);
         } catch {
           btn.disabled = false;
@@ -322,7 +399,7 @@
     calc();
   }
 
-  // 5. FETCH CONFIG & RULES
+  // 4. FETCH CONFIG & RULES
   let configCache = null;
   async function getConfig() {
     if (configCache) return configCache;
@@ -342,7 +419,7 @@
     return Array.isArray(cfg?.rules) ? cfg.rules : [];
   }
 
-  // 6. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
+  // 5. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
   const cleanCode = (t) =>
     (t || "")
       .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
@@ -413,7 +490,7 @@
     return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
-  // 7. SYNC CART DISCOUNT & ESTIMATED TOTAL
+  // 6. SYNC CART DISCOUNT, CLUB WITH MANUAL COUPONS & UPDATE ESTIMATED TOTAL
   let syncLock = false;
   async function syncCartDiscount() {
     if (syncLock) return;
@@ -424,7 +501,6 @@
       const cart = await res.json();
 
       if (!cart?.items?.length) {
-        if (lastAppliedCode) await applyCartDiscount("");
         clearDrawerEstimatedTotal();
         return;
       }
@@ -443,6 +519,7 @@
       if (lineOrig > origTotal) origTotal = lineOrig;
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
+      // Check if rules calculate additional/active savings
       const rules = await getRules();
       const { disc, code } = getActiveDiscount(cart, rules);
 
@@ -451,12 +528,36 @@
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
       }
 
-      if (code && disc > 0) {
-        if (code !== lastAppliedCode) {
-          await applyCartDiscount(code);
+      // Check for Manual Coupons (e.g. LOYAL) from Shopify cart-level discount applications
+      let manualCouponAmount = 0;
+      if (Array.isArray(cart.cart_level_discount_applications) && cart.cart_level_discount_applications.length > 0) {
+        cart.cart_level_discount_applications.forEach((app) => {
+          const amt = Number(app.total_allocated_amount || 0);
+          if (amt > 0) manualCouponAmount += amt;
+        });
+      }
+
+      // Check for Manual Coupons applied in Shiprocket drawer UI
+      getRoots().forEach((root) => {
+        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount, .sr-discount");
+        if (coupAmtEl) {
+          const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
+          const cVal = Math.round(parseFloat(txt) * 100);
+          if (cVal > 0 && manualCouponAmount === 0) {
+            manualCouponAmount = cVal;
+          }
         }
-      } else if (lastAppliedCode) {
-        await applyCartDiscount("");
+      });
+
+      // CLUBBING: Deduct manual coupon from the already discounted item total!
+      if (manualCouponAmount > 0) {
+        lastAppliedCode = null;
+        finalTotal = Math.max(0, finalTotal - manualCouponAmount);
+      }
+
+      // Preapply active rule code only if no other manual coupon is present
+      if (code && disc > 0 && manualCouponAmount === 0) {
+        preapply(code);
       }
 
       if (finalTotal < origTotal) {
@@ -469,7 +570,7 @@
     }
   }
 
-  // 8. PDP HYDRATION & DYNAMIC INJECTION
+  // 7. PDP HYDRATION & DYNAMIC INJECTION
   let pdpInjected = false;
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
@@ -695,24 +796,13 @@
     } catch {}
   }
 
-  // 9. OBSERVER & INTERCEPTOR
-  let obsTimer = null;
-  const observer = new MutationObserver(() => {
-    if (!activeFinalCents || obsTimer) return;
-    obsTimer = setTimeout(() => {
-      obsTimer = null;
-      if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
-        updateEstimatedTotal(activeFinalCents, activeOrigCents);
-      }
-    }, 80);
-  });
-
+  // 8. INTERCEPT CART CALLS
   const _fetch = window.fetch;
   window.fetch = function(...args) {
     const res = _fetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-      if (/\/cart\/(add|change|update|clear)/.test(url) && !url.includes("_bt=") && !url.includes("update.js")) {
+      if (/\/cart\/(add|change|update|clear)/.test(url) && !url.includes("_bt=")) {
         res.then(() => setTimeout(syncCartDiscount, 300)).catch(() => {});
       }
     } catch {}
@@ -724,7 +814,8 @@
     if (!btn) return;
     const txt = (btn.textContent || "").trim().toLowerCase();
     if (txt.includes("buy now") || txt.includes("checkout")) {
-      if (lastAppliedCode) {
+      const hasManual = getRoots().some((r) => r.querySelector("#sr-cart-applied-coupon-amount, .sr-discount, .discount_wrapper, [class*='applied-coupon']"));
+      if (lastAppliedCode && !hasManual) {
         fetch(ROOT + "discount/" + encodeURIComponent(lastAppliedCode)).catch(() => {});
         document.cookie = "discount_code=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
         document.cookie = "fastrrCouponCode=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
@@ -742,7 +833,7 @@
   function start() {
     hydratePdp();
     setTimeout(syncCartDiscount, 500);
-    try { observer.observe(document.body, { childList: true, subtree: true }); } catch {}
+    attachObservers();
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
