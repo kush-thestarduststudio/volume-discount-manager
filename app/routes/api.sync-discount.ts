@@ -195,6 +195,29 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               ... on DiscountAutomaticBasic {
                 title
                 status
+                combinesWith {
+                  orderDiscounts
+                  productDiscounts
+                  shippingDiscounts
+                }
+              }
+              ... on DiscountAutomaticBxgy {
+                title
+                status
+                combinesWith {
+                  orderDiscounts
+                  productDiscounts
+                  shippingDiscounts
+                }
+              }
+              ... on DiscountAutomaticApp {
+                title
+                status
+                combinesWith {
+                  orderDiscounts
+                  productDiscounts
+                  shippingDiscounts
+                }
               }
               ... on DiscountCodeBasic {
                 title
@@ -203,6 +226,39 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                   nodes {
                     code
                   }
+                }
+                combinesWith {
+                  orderDiscounts
+                  productDiscounts
+                  shippingDiscounts
+                }
+              }
+              ... on DiscountCodeBxgy {
+                title
+                status
+                codes(first: 5) {
+                  nodes {
+                    code
+                  }
+                }
+                combinesWith {
+                  orderDiscounts
+                  productDiscounts
+                  shippingDiscounts
+                }
+              }
+              ... on DiscountCodeApp {
+                title
+                status
+                codes(first: 5) {
+                  nodes {
+                    code
+                  }
+                }
+                combinesWith {
+                  orderDiscounts
+                  productDiscounts
+                  shippingDiscounts
                 }
               }
             }
@@ -394,6 +450,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         ok: true,
         shop,
         planType: "GROW_OR_STANDARD_AUTOMATIC_DISCOUNT",
+        allDiscounts: allNodes.map((n: any) => ({
+          id: n.id,
+          typename: n.discount?.__typename,
+          title: n.discount?.title,
+          status: n.discount?.status,
+          combinesWith: n.discount?.combinesWith,
+          codes: n.discount?.codes?.nodes?.map((c: any) => c.code) || [],
+        })),
         expectedDiscounts,
         created: createResults,
         deleted: deleteResults,
