@@ -14,6 +14,21 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
+  // Clear any legacy app discount codes from cookies so Shiprocket / Fastrr coupon slot is 100% free for LOYAL
+  function clearAppCouponCookies() {
+    try {
+      ["fastrrCouponCode", "discount_code"].forEach((name) => {
+        const m = document.cookie.match(new RegExp("(?:^|;\\s*)" + name + "=([^;]*)"));
+        if (m) {
+          const val = decodeURIComponent(m[1] || "").toUpperCase();
+          if (val.startsWith("TEST-BUY") || val.startsWith("BUNDLE-") || val.includes("-BUY") || val.includes("OFF")) {
+            document.cookie = `${name}=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+          }
+        }
+      });
+    } catch {}
+  }
+
   // Access all DOM roots including Shiprocket Smart Cart Shadow DOM
   function getRoots() {
     const roots = [document];
@@ -209,171 +224,7 @@
     });
   }
 
-  // 2. DISCOVER CUSTOMER COUPONS (PRESERVES LOYAL, WELCOME, ETC. ACROSS CRUD)
-  function getCustomerCoupons(cart, activeAppCode) {
-    const customerCoupons = new Set();
-    const appUpper = (activeAppCode || "").toUpperCase();
-
-    // 1. From cart_level_discount_applications
-    if (Array.isArray(cart?.cart_level_discount_applications)) {
-      cart.cart_level_discount_applications.forEach((app) => {
-        const title = (app.title || "").trim();
-        if (!title) return;
-        const upper = title.toUpperCase();
-        if (
-          upper !== appUpper &&
-          !upper.startsWith("[VOLUME") &&
-          !upper.startsWith("[BUNDLE") &&
-          !upper.startsWith("TEST-BUY") &&
-          !upper.startsWith("BUNDLE-")
-        ) {
-          customerCoupons.add(title);
-        }
-      });
-    }
-
-    // 2. From Shiprocket Smart Cart UI / Shadow DOM
-    getRoots().forEach((root) => {
-      const nameEl = root.querySelector("#sr-cart-applied-coupon-name, #sr-cart-applied-coupon-title");
-      const name = (nameEl?.textContent || "").trim();
-      if (name) {
-        const upper = name.toUpperCase();
-        if (
-          upper !== appUpper &&
-          !upper.startsWith("[VOLUME") &&
-          !upper.startsWith("[BUNDLE") &&
-          !upper.startsWith("TEST-BUY") &&
-          !upper.startsWith("BUNDLE-")
-        ) {
-          customerCoupons.add(name);
-        }
-      }
-
-      const textNodes = Array.from(root.querySelectorAll("*")).filter(
-        (el) => el.children.length === 0 && (el.textContent || "").includes("saved with")
-      );
-      textNodes.forEach((el) => {
-        const m = (el.textContent || "").match(/saved with\s+([A-Za-z0-9_-]+)/i);
-        if (m && m[1]) {
-          const code = m[1].trim();
-          const upper = code.toUpperCase();
-          if (
-            upper !== appUpper &&
-            !upper.startsWith("[VOLUME") &&
-            !upper.startsWith("[BUNDLE") &&
-            !upper.startsWith("TEST-BUY") &&
-            !upper.startsWith("BUNDLE-")
-          ) {
-            customerCoupons.add(code);
-          }
-        }
-      });
-    });
-
-    // 3. From persistent cookies
-    try {
-      const cookies = document.cookie.split(";");
-      cookies.forEach((c) => {
-        const [k, v] = c.trim().split("=");
-        if (k === "fastrrCouponCode" || k === "discount_code") {
-          const decoded = decodeURIComponent(v || "").trim();
-          const upper = decoded.toUpperCase();
-          if (
-            decoded &&
-            upper !== appUpper &&
-            !upper.startsWith("[VOLUME") &&
-            !upper.startsWith("[BUNDLE") &&
-            !upper.startsWith("TEST-BUY") &&
-            !upper.startsWith("BUNDLE-")
-          ) {
-            customerCoupons.add(decoded);
-          }
-        }
-      });
-    } catch {}
-
-    return Array.from(customerCoupons);
-  }
-
-  // 3. APPLY DISCOUNT DIRECTLY TO SHOPIFY CART API (STOREFRONT API + /discount/ + COOKIES)
-  let lastMutatedCodeKey = null;
-  async function mutateCartDiscountCodes(cart, codes) {
-    if (!cart?.token) return;
-
-    const targetCodes = (codes || []).filter(Boolean);
-    const codeKey = `${cart.token}:${targetCodes.slice().sort().join(",")}`;
-    if (codeKey === lastMutatedCodeKey) return;
-
-    const token =
-      window.__btStorefrontToken ||
-      configCache?.storefrontToken ||
-      window.Shopify?.Storefront?.accessToken ||
-      window.lbupsellToken ||
-      "c08d56cae211c47c68cb3cd03b882be8";
-
-    const rawCartId = cart.id || cart.token || "";
-    const cartId = rawCartId.startsWith("gid://shopify/Cart/")
-      ? rawCartId
-      : `gid://shopify/Cart/${rawCartId}`;
-
-    // A. Apply via Storefront API mutation (supports multiple combined codes e.g. [appCode, LOYAL])
-    if (token) {
-      const query = `
-        mutation cartDiscountCodesUpdate($cartId: ID!, $discountCodes: [String!]!) {
-          cartDiscountCodesUpdate(cartId: $cartId, discountCodes: $discountCodes) {
-            cart {
-              id
-              discountCodes {
-                code
-                applicable
-              }
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
-
-      try {
-        await fetch(`${ROOT}api/2024-04/graphql.json`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Storefront-Access-Token": token,
-          },
-          body: JSON.stringify({
-            query,
-            variables: {
-              cartId,
-              discountCodes: targetCodes,
-            },
-          }),
-        });
-      } catch {}
-    }
-
-    // B. Also sync to native Shopify /discount/ URL and cookies
-    const primaryCode = targetCodes[0] || "";
-    if (primaryCode) {
-      try {
-        fetch(`${ROOT}discount/${encodeURIComponent(primaryCode)}`, { method: "GET", credentials: "same-origin" }).catch(() => {});
-        document.cookie = `discount_code=${encodeURIComponent(primaryCode)}; path=/; max-age=86400`;
-        document.cookie = `fastrrCouponCode=${encodeURIComponent(primaryCode)}; path=/; max-age=86400`;
-      } catch {}
-    } else if (lastMutatedCodeKey && targetCodes.length === 0) {
-      try {
-        fetch(`${ROOT}discount/CLEAR`, { method: "GET", credentials: "same-origin" }).catch(() => {});
-        document.cookie = "discount_code=; path=/; max-age=0";
-        document.cookie = "fastrrCouponCode=; path=/; max-age=0";
-      } catch {}
-    }
-
-    lastMutatedCodeKey = codeKey;
-  }
-
-  // 4. VOLUME WIDGET INITIALIZATION
+  // 2. VOLUME WIDGET INITIALIZATION
   function initVolume(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -451,7 +302,7 @@
     render();
   }
 
-  // 5. FBT WIDGET INITIALIZATION
+  // 3. FBT WIDGET INITIALIZATION
   function initFbt(wrap) {
     if (!wrap || wrap.dataset.btInit) return;
     wrap.dataset.btInit = "1";
@@ -548,7 +399,7 @@
     calc();
   }
 
-  // 6. FETCH CONFIG & RULES (STRICTLY FROM DATABASE / NO SYNTHETIC FALLBACKS)
+  // 4. FETCH CONFIG & RULES (STRICTLY FROM DATABASE / NO SYNTHETIC FALLBACKS)
   let configCache = null;
   let syncRulesCache = (() => {
     try {
@@ -595,7 +446,7 @@
     return Array.isArray(cfg?.rules) ? cfg.rules : getRulesSync();
   }
 
-  // 7. FIND APPLICABLE DISCOUNT (EVALUATED FOR CURRENT CART)
+  // 5. FIND APPLICABLE DISCOUNT (EVALUATED FOR CURRENT CART)
   const cleanCode = (t) =>
     (t || "")
       .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
@@ -664,19 +515,20 @@
     return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
-  // 8. SYNC CART DISCOUNT DISPLAY & APPLY TO CART API ACROSS CRUD OPERATIONS
+  // 6. SYNC CART DISCOUNT DISPLAY ACROSS ALL CRUD OPERATIONS (NATIVE AUTOMATIC COMBINING)
   let syncLock = false;
   async function syncCartDiscount() {
     if (syncLock) return;
     syncLock = true;
     try {
+      clearAppCouponCookies();
+
       const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
       if (!res.ok) return;
       const cart = await res.json();
 
       if (!cart?.items?.length) {
         clearDrawerEstimatedTotal();
-        await mutateCartDiscountCodes(cart, []);
         return;
       }
 
@@ -696,24 +548,13 @@
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
       // 1. Calculate active app discount
-      const { disc, code: activeCode } = getActiveDiscount(cart, rules);
+      const { disc } = getActiveDiscount(cart, rules);
       if (disc > 0) {
         const ruleFinal = Math.max(0, origTotal - disc);
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
       }
 
-      // 2. Discover and preserve customer coupons (e.g. LOYAL)
-      const customerCoupons = getCustomerCoupons(cart, activeCode);
-
-      // 3. Build target codes for Cart API
-      const targetCodes = (activeCode && disc > 0)
-        ? Array.from(new Set([activeCode, ...customerCoupons]))
-        : customerCoupons;
-
-      // 4. APPLY DIRECTLY INTO CART API (Storefront API + /discount/ + cookies)
-      await mutateCartDiscountCodes(cart, targetCodes);
-
-      // 5. Deduct manual coupons for estimated total display
+      // 2. Discover and combine with any manual coupons (e.g. LOYAL) entered in Shiprocket Smart Cart / Fastrr
       let manualCouponAmount = 0;
       if (Array.isArray(cart.cart_level_discount_applications) && cart.cart_level_discount_applications.length > 0) {
         cart.cart_level_discount_applications.forEach((app) => {
@@ -753,6 +594,7 @@
         }
       });
 
+      // Combine: Deduct manual coupon from total alongside volume discount!
       if (manualCouponAmount > 0) {
         finalTotal = Math.max(0, finalTotal - manualCouponAmount);
       }
@@ -767,7 +609,7 @@
     }
   }
 
-  // 9. PDP HYDRATION & DYNAMIC INJECTION (RENDER ONLY CONFIGURED TIERS)
+  // 7. PDP HYDRATION & DYNAMIC INJECTION (RENDER ONLY CONFIGURED TIERS)
   let pdpInjected = false;
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
@@ -993,7 +835,7 @@
     } catch {}
   }
 
-  // 10. PASS-THROUGH CART CALLS (ZERO TAMPERING / INSTANT REFRESH ON CRUD)
+  // 8. PASS-THROUGH CART CALLS (ZERO TAMPERING / INSTANT REFRESH ON CRUD)
   const _fetch = window.fetch;
   window.fetch = function(...args) {
     const res = _fetch.apply(this, args);
@@ -1050,6 +892,7 @@
   }, true);
 
   function start() {
+    clearAppCouponCookies();
     getConfig();
     hydratePdp();
     setTimeout(syncCartDiscount, 300);
