@@ -84,13 +84,31 @@
   }
 
   // Storefront API Cart Discount Mutation (Selleasy Method)
+  // Preserves ALL existing customer discount codes (e.g. LOYAL) and merges with bundle discount!
   let lastMutatedCodeKey = null;
   async function mutateCartDiscountCodes(cart, codes) {
     const token = window.lbupsellToken || "c08d56cae211c47c68cb3cd03b882be8";
     if (!token || !cart?.token) return;
 
-    const normalizedCodes = (codes || []).filter(Boolean);
-    const codeKey = normalizedCodes.sort().join(",");
+    // Collect ALL existing discount codes present in the cart
+    const existingCodes = [];
+    if (Array.isArray(cart.discount_codes)) {
+      cart.discount_codes.forEach((d) => {
+        const c = d?.code || (typeof d === "string" ? d : "");
+        if (c) existingCodes.push(c);
+      });
+    }
+    if (Array.isArray(cart.cart_level_discount_applications)) {
+      cart.cart_level_discount_applications.forEach((a) => {
+        const t = a?.title;
+        if (t && !t.startsWith("[Volume") && !t.startsWith("[Bundle") && !t.includes("FREEGIFT")) {
+          existingCodes.push(t);
+        }
+      });
+    }
+
+    const merged = Array.from(new Set([...existingCodes, ...(codes || [])])).filter(Boolean);
+    const codeKey = merged.slice().sort().join(",");
     if (codeKey === lastMutatedCodeKey) return;
 
     const cartId = `gid://shopify/Cart/${cart.token}`;
@@ -123,7 +141,7 @@
           query,
           variables: {
             id: cartId,
-            discountCodes: normalizedCodes,
+            discountCodes: merged,
           },
         }),
       });
@@ -474,8 +492,29 @@
     calc();
   }
 
-  // 4. FETCH CONFIG & RULES
+  // 4. FETCH CONFIG & RULES WITH SYNCHRONOUS CACHING
   let configCache = null;
+  let syncRulesCache = (() => {
+    try {
+      if (Array.isArray(window.__btRules) && window.__btRules.length > 0) {
+        return window.__btRules;
+      }
+      const raw = localStorage.getItem("__btRules") || localStorage.getItem("bt_rules_cache");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [];
+  })();
+
+  function getRulesSync() {
+    if (Array.isArray(window.__btRules) && window.__btRules.length > 0) return window.__btRules;
+    if (Array.isArray(configCache?.rules) && configCache.rules.length > 0) return configCache.rules;
+    if (Array.isArray(syncRulesCache) && syncRulesCache.length > 0) return syncRulesCache;
+    return [];
+  }
+
   async function getConfig() {
     if (configCache) return configCache;
     try {
@@ -483,15 +522,23 @@
       const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}`)).json();
       if (res?.ok) {
         configCache = res;
+        if (Array.isArray(res.rules)) {
+          syncRulesCache = res.rules;
+          window.__btRules = res.rules;
+          try {
+            localStorage.setItem("bt_rules_cache", JSON.stringify(res.rules));
+            localStorage.setItem("__btRules", JSON.stringify(res.rules));
+          } catch {}
+        }
         return res;
       }
     } catch {}
-    return { rules: window.__btRules || [], settings: window.__btSettings || {} };
+    return { rules: getRulesSync(), settings: window.__btSettings || {} };
   }
 
   async function getRules() {
     const cfg = await getConfig();
-    return Array.isArray(cfg?.rules) ? cfg.rules : [];
+    return Array.isArray(cfg?.rules) && cfg.rules.length > 0 ? cfg.rules : getRulesSync();
   }
 
   // 5. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
@@ -563,6 +610,118 @@
     // Max Savings Rule: Highest discount wins!
     candidates.sort((a, b) => b.disc - a.disc);
     return { disc: candidates[0].disc, code: candidates[0].code };
+  }
+
+  // IN-MEMORY CART TRANSFORMATION
+  // Injects _isYtBundle & _bundleItems with discounted price directly into cart.items
+  // so Fastrr's z(e, t) maps `price: discountedUnit` instantly with 0ms race condition!
+  function transformCartResponse(cart) {
+    if (!cart || !Array.isArray(cart.items)) return cart;
+    const rules = getRulesSync();
+    if (!rules.length) return cart;
+
+    const vRules = rules.filter(r => r.active && r.ruleType === "VOLUME" && r.tiers?.length);
+    const fRules = rules.filter(r => r.active && r.ruleType === "FBT" && r.fbtProducts?.length);
+
+    let totalLineDiscount = 0;
+
+    for (const item of cart.items) {
+      const pId = String(item.product_id);
+      const vId = item.variant_id;
+      const qty = item.quantity;
+      const origUnit = (item.original_price || item.price) / 100;
+      let bestUnit = origUnit;
+
+      // 1. Volume Rules
+      for (const vr of vRules) {
+        const tId = String(vr.targetGid || "").replace(/\D/g, "");
+        const isMatch = vr.targetType === "PRODUCT"
+          ? pId === tId
+          : (vr.collectionProductIds || []).map(String).includes(pId);
+
+        if (isMatch) {
+          const matchingItems = cart.items.filter(it =>
+            vr.targetType === "PRODUCT"
+              ? String(it.product_id) === tId
+              : (vr.collectionProductIds || []).map(String).includes(String(it.product_id))
+          );
+          const totalQty = matchingItems.reduce((s, it) => s + it.quantity, 0);
+          const tier = [...vr.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find(x => totalQty >= x.minQuantity);
+          if (tier) {
+            const isFixed = tier.discountType === "FIXED_AMOUNT";
+            const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue || 0));
+            if (val > 0) {
+              const discUnit = isFixed
+                ? Math.max(0, origUnit - (val / totalQty))
+                : Math.max(0, origUnit * (1 - val / 100));
+              if (discUnit < bestUnit) {
+                bestUnit = discUnit;
+              }
+            }
+          }
+        }
+      }
+
+      // 2. FBT Rules
+      for (const fr of fRules) {
+        const tId = String(fr.targetGid || "").replace(/\D/g, "");
+        const cIds = fr.fbtProducts.map(p => String(p.productId || "").replace(/\D/g, ""));
+        const targetItem = cart.items.find(it => String(it.product_id) === tId);
+        const hasAll = targetItem && cIds.every(id => cart.items.some(it => String(it.product_id) === id));
+
+        if (hasAll && (pId === tId || cIds.includes(pId))) {
+          const isFixed = fr.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? fr.discountValue : (fr.mainDiscountPercent || fr.discountValue || 10));
+          if (val > 0) {
+            let fbtUnit = origUnit;
+            if (isFixed) {
+              const totalBundleItems = 1 + cIds.length;
+              fbtUnit = Math.max(0, origUnit - (val / totalBundleItems));
+            } else {
+              let pct = val;
+              if (pId === tId) {
+                pct = Number(fr.mainDiscountPercent || val);
+              } else {
+                const cp = fr.fbtProducts.find(p => String(p.productId || "").replace(/\D/g, "") === pId);
+                pct = Number(cp?.discountPercent || val);
+              }
+              fbtUnit = Math.max(0, origUnit * (1 - pct / 100));
+            }
+            if (fbtUnit < bestUnit) {
+              bestUnit = fbtUnit;
+            }
+          }
+        }
+      }
+
+      item.properties = item.properties || {};
+
+      if (bestUnit < origUnit) {
+        const roundUnit = Number(bestUnit.toFixed(2));
+        item.properties._isYtBundle = "true";
+        item.properties._bundleItems = JSON.stringify([{
+          variantId: vId,
+          quantity: qty,
+          price: roundUnit
+        }]);
+        item.final_price = Math.round(roundUnit * 100);
+        item.final_line_price = item.final_price * qty;
+        item.discounted_price = item.final_price;
+        totalLineDiscount += (origUnit - roundUnit) * qty * 100;
+      } else if (item.properties._isYtBundle === "true") {
+        delete item.properties._isYtBundle;
+        delete item.properties._bundleItems;
+        item.final_price = item.original_price || item.price;
+        item.final_line_price = item.original_line_price || (item.price * qty);
+      }
+    }
+
+    if (totalLineDiscount > 0) {
+      const origTotal = cart.original_total_price || cart.items.reduce((s, it) => s + (it.original_line_price || it.price * it.quantity), 0);
+      cart.total_price = Math.max(0, origTotal - Math.round(totalLineDiscount));
+      cart.total_discount = Math.round(totalLineDiscount);
+    }
+    return cart;
   }
 
   // 6. SYNC FASTRR BUNDLE PROPERTIES & CART DISCOUNT (CLUB WITH COUPONS & FREEBIES)
@@ -830,6 +989,7 @@
       }
 
       // Apply rule discount code to Shopify Cart via Storefront API (Selleasy method)
+      // Preserves existing customer discount codes (e.g. LOYAL) and avoids clobbering!
       if (code && disc > 0) {
         await mutateCartDiscountCodes(cart, [code]);
       } else {
@@ -931,7 +1091,7 @@
           volDiv.innerHTML = `
             <div class="bt-widget-header">
               <h3 class="bt-widget-title">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="20" height="20" viewBox="24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
                   <line x1="7" y1="7" x2="7.01" y2="7"/>
                 </svg>
@@ -1046,7 +1206,7 @@
           fbtDiv.innerHTML = `
             <div class="bt-widget-header">
               <h3 class="bt-widget-title">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="20" height="20" viewBox="24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
                   <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
                 </svg>
@@ -1072,16 +1232,33 @@
     } catch {}
   }
 
-  // 8. INTERCEPT CART CALLS & CHECKOUT HOOKS
+  // 8. INTERCEPT CART CALLS & CHECKOUT HOOKS (SYNCHRONOUS IN-MEMORY INTERCEPTION)
   const _fetch = window.fetch;
-  window.fetch = function(...args) {
-    const res = _fetch.apply(this, args);
-    try {
-      const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-      if (/\/cart(\.js|\/(add|change|update|clear))/i.test(url) && !url.includes("_bt=")) {
-        res.then(() => setTimeout(syncCartDiscount, 250)).catch(() => {});
-      }
-    } catch {}
+  window.fetch = async function(...args) {
+    const url = typeof args[0] === "string" ? args[0] : (args[0]?.url || "");
+    const isCartReq = /\/cart(\.js|\.json)?(\?|$)/i.test(url) || /\/cart\/(add|change|update)(\.js|\.json)?(\?|$)/i.test(url);
+    const isInternal = url.includes("_bt=");
+
+    const res = await _fetch.apply(this, args);
+
+    if (isCartReq && !isInternal && res.ok) {
+      try {
+        const clone = res.clone();
+        const json = await clone.json();
+        if (json && Array.isArray(json.items)) {
+          transformCartResponse(json);
+          setTimeout(syncCartDiscount, 100);
+          return new Response(JSON.stringify(json), {
+            status: res.status,
+            statusText: res.statusText,
+            headers: res.headers
+          });
+        }
+      } catch {}
+      setTimeout(syncCartDiscount, 200);
+    } else if (isCartReq && !isInternal) {
+      setTimeout(syncCartDiscount, 250);
+    }
     return res;
   };
 
@@ -1092,10 +1269,27 @@
     return _xhrOpen.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
-    if (this._btUrl && /\/cart(\.js|\/(add|change|update|clear))/i.test(this._btUrl) && !this._btUrl.includes("_bt=")) {
-      this.addEventListener("load", () => {
-        setTimeout(syncCartDiscount, 250);
-      });
+    if (this._btUrl && !this._btUrl.includes("_bt=") &&
+        (/\/(cart\.js|cart\.json)(\?|$)/i.test(this._btUrl) || /\/cart\/(add|change|update)(\.js|\.json)?(\?|$)/i.test(this._btUrl))) {
+      const self = this;
+      let overridden = false;
+      const interceptXhr = () => {
+        try {
+          if (self.readyState === 4 && self.status === 200 && !overridden) {
+            overridden = true;
+            const data = JSON.parse(self.responseText);
+            if (data && Array.isArray(data.items)) {
+              transformCartResponse(data);
+              const transformedStr = JSON.stringify(data);
+              Object.defineProperty(self, "responseText", { get: () => transformedStr, configurable: true });
+              Object.defineProperty(self, "response", { get: () => transformedStr, configurable: true });
+              setTimeout(syncCartDiscount, 100);
+            }
+          }
+        } catch {}
+      };
+      this.addEventListener("readystatechange", interceptXhr, true);
+      this.addEventListener("load", interceptXhr, true);
     }
     return _xhrSend.apply(this, args);
   };
@@ -1125,10 +1319,11 @@
   }, true);
 
   function start() {
+    getConfig(); // preload & cache rules
     hookShiprocketBuyCart();
     hookFastrr();
     hydratePdp();
-    setTimeout(syncCartDiscount, 500);
+    setTimeout(syncCartDiscount, 300);
     attachObservers();
     setInterval(hookShiprocketBuyCart, 1000);
   }
