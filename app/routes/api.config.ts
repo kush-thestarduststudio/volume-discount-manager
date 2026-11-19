@@ -49,27 +49,54 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     if (!rules.length) {
       try {
-        const seedRule = await prisma.bundleRule.create({
+        const seedVolRule = await prisma.bundleRule.create({
           data: {
             shop: cleanShop || "stardustt-studio.myshopify.com",
             title: "Volume Tier: test",
             targetType: "PRODUCT",
             targetGid: "gid://shopify/Product/7488883753012",
             tiers: JSON.stringify([
-              {
-                minQuantity: 4,
-                discountPercent: 10,
-                discountType: "PERCENTAGE",
-                discountValue: 10,
-                label: "Buy 4+ (10% OFF)",
-                code: "TEST-BUY4-10OFF",
-              },
+              { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
+              { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
+              { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
             ]),
             fbtProducts: "[]",
             active: true,
           },
         });
-        rules = [seedRule];
+
+        const seedFbtRule = await prisma.bundleRule.create({
+          data: {
+            shop: cleanShop || "stardustt-studio.myshopify.com",
+            title: "Bundle for: test",
+            targetType: "PRODUCT",
+            targetGid: "gid://shopify/Product/7488883753012",
+            tiers: "[]",
+            fbtProducts: JSON.stringify({
+              mainDiscountPercent: 15,
+              discountType: "PERCENTAGE",
+              discountValue: 15,
+              triggerProduct: {
+                id: "7488883753012",
+                variantId: "46920435957812",
+                title: "test",
+                priceCents: 40000,
+                image: ""
+              },
+              companions: [
+                {
+                  productId: "8245592817876",
+                  variantId: "44722881888468",
+                  title: "7 Chakra and Hematite Ring Bracelet",
+                  priceCents: 99800,
+                  discountPercent: 15,
+                }
+              ]
+            }),
+            active: true,
+          },
+        });
+        rules = [seedVolRule, seedFbtRule];
       } catch {}
     }
 

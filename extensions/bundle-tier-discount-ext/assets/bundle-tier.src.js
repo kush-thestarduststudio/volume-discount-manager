@@ -14,7 +14,7 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
-  // Clear any legacy app discount codes from cookies so Shiprocket / Fastrr coupon slot is 100% free for LOYAL
+  // Clear any legacy app discount codes from cookies and localStorage so Shiprocket / Fastrr coupon slot is 100% free for LOYAL
   function clearAppCouponCookies() {
     try {
       ["fastrrCouponCode", "discount_code"].forEach((name) => {
@@ -26,6 +26,10 @@
           }
         }
       });
+      const ls = (localStorage.getItem("fastrrCouponCode") || "").toUpperCase();
+      if (ls.startsWith("TEST-BUY") || ls.startsWith("BUNDLE-") || ls.includes("-BUY") || ls.includes("OFF")) {
+        localStorage.removeItem("fastrrCouponCode");
+      }
     } catch {}
   }
 
@@ -691,11 +695,14 @@
         }
       }
 
-      // Fastrr / Shiprocket Cookie Management
+      // Fastrr / Shiprocket Cookie & localStorage Management (for Smart Cart checkout payload)
       if (disc > 0 && appDiscountCode) {
         if (!customerCoupons.length) {
           document.cookie = `discount_code=${appDiscountCode}; path=/; SameSite=None; Secure`;
           document.cookie = `fastrrCouponCode=${appDiscountCode}; path=/; SameSite=None; Secure`;
+          try { localStorage.setItem("fastrrCouponCode", appDiscountCode); } catch {}
+        } else {
+          try { localStorage.setItem("fastrrCouponCode", customerCoupons[0]); } catch {}
         }
       } else {
         clearAppCouponCookies();
