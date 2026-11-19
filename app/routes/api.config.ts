@@ -11,7 +11,8 @@ const FALLBACK_RULES = [
     mainDiscountPercent: 0,
     tiers: [
       { minQuantity: 2, discountPercent: 10, label: "Buy 2 - Save 10%" },
-      { minQuantity: 4, discountPercent: 15, label: "Buy 4 - Save 15%" },
+      { minQuantity: 3, discountPercent: 15, label: "Buy 3 - Save 15%" },
+      { minQuantity: 4, discountPercent: 20, label: "Buy 4 - Save 20%" },
     ],
     fbtProducts: [],
     active: true,
@@ -137,6 +138,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           code: `${cleanName}-BUY${t.minQuantity}-${val}OFF`,
         };
       });
+
+      // Ensure standard volume tiers (2+, 3+, 4+) are available for volume rules
+      if (!isFbt && enhancedTiers.length > 0 && !enhancedTiers.some((t: any) => t.minQuantity === 2)) {
+        enhancedTiers.unshift({
+          minQuantity: 2,
+          discountType: "PERCENTAGE",
+          discountValue: 10,
+          discountPercent: 10,
+          label: "Buy 2 - Save 10%",
+          code: `${cleanName}-BUY2-10OFF`
+        });
+      }
 
       return {
         id: r.id,

@@ -617,8 +617,7 @@
   // so Fastrr's z(e, t) maps `price: discountedUnit` instantly with 0ms race condition!
   function transformCartResponse(cart) {
     if (!cart || !Array.isArray(cart.items)) return cart;
-    const rules = getRulesSync();
-    if (!rules.length) return cart;
+    const rules = getRulesSync() || [];
 
     const vRules = rules.filter(r => r.active && r.ruleType === "VOLUME" && r.tiers?.length);
     const fRules = rules.filter(r => r.active && r.ruleType === "FBT" && r.fbtProducts?.length);
@@ -631,6 +630,14 @@
       const qty = item.quantity;
       const origUnit = (item.original_price || item.price) / 100;
       let bestUnit = origUnit;
+
+      // 0. Check Shopify native discount / automatic discount already applied to this line
+      if (item.final_price && item.final_price < (item.original_price || item.price)) {
+        bestUnit = Math.min(bestUnit, item.final_price / 100);
+      }
+      if (item.discounted_price && item.discounted_price < (item.original_price || item.price)) {
+        bestUnit = Math.min(bestUnit, item.discounted_price / 100);
+      }
 
       // 1. Volume Rules
       for (const vr of vRules) {
@@ -646,7 +653,11 @@
               : (vr.collectionProductIds || []).map(String).includes(String(it.product_id))
           );
           const totalQty = matchingItems.reduce((s, it) => s + it.quantity, 0);
-          const tier = [...vr.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find(x => totalQty >= x.minQuantity);
+          let tier = [...vr.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find(x => totalQty >= x.minQuantity);
+          if (!tier && totalQty >= 2 && !vr.tiers.some(x => x.minQuantity <= totalQty)) {
+            // Default 10% volume discount for 2+ items if volume rule is active on product
+            tier = { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10 };
+          }
           if (tier) {
             const isFixed = tier.discountType === "FIXED_AMOUNT";
             const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue || 0));
@@ -698,21 +709,31 @@
 
       if (bestUnit < origUnit) {
         const roundUnit = Number(bestUnit.toFixed(2));
+        const roundCents = Math.round(roundUnit * 100);
+
+        item.price = roundCents;
+        item.final_price = roundCents;
+        item.discounted_price = roundCents;
+        item.final_line_price = roundCents * qty;
+        item.line_price = roundCents * qty;
+
         item.properties._isYtBundle = "true";
         item.properties._bundleItems = JSON.stringify([{
           variantId: vId,
           quantity: qty,
           price: roundUnit
         }]);
-        item.final_price = Math.round(roundUnit * 100);
-        item.final_line_price = item.final_price * qty;
-        item.discounted_price = item.final_price;
+
         totalLineDiscount += (origUnit - roundUnit) * qty * 100;
       } else if (item.properties._isYtBundle === "true") {
         delete item.properties._isYtBundle;
         delete item.properties._bundleItems;
-        item.final_price = item.original_price || item.price;
-        item.final_line_price = item.original_line_price || (item.price * qty);
+        const baseCents = item.original_price || item.price;
+        item.price = baseCents;
+        item.final_price = baseCents;
+        item.discounted_price = baseCents;
+        item.final_line_price = item.original_line_price || (baseCents * qty);
+        item.line_price = item.final_line_price;
       }
     }
 
@@ -728,14 +749,37 @@
   function hookShiprocketBuyCart() {
     if (typeof window.shiprocketCheckoutBuyCartHandler === "function" && !window.shiprocketCheckoutBuyCartHandler._btHooked) {
       const origHandler = window.shiprocketCheckoutBuyCartHandler;
-      const wrapped = async function(...args) {
+      window.shiprocketCheckoutBuyCartHandler = async function(...args) {
         try {
           await syncCartDiscount();
         } catch {}
         return origHandler.apply(this, args);
       };
-      wrapped._btHooked = true;
-      window.shiprocketCheckoutBuyCartHandler = wrapped;
+      window.shiprocketCheckoutBuyCartHandler._btHooked = true;
+    }
+
+    if (window.shiprocketCheckoutEvents && !window.shiprocketCheckoutEvents._btHooked) {
+      window.shiprocketCheckoutEvents._btHooked = true;
+      const origBuyCart = window.shiprocketCheckoutEvents.buyCart;
+      if (typeof origBuyCart === "function") {
+        window.shiprocketCheckoutEvents.buyCart = async function(e, t) {
+          try {
+            await syncCartDiscount();
+          } catch {}
+          return origBuyCart.call(this, e, t);
+        };
+      }
+    }
+
+    if (window.HeadlessCheckout && !window.HeadlessCheckout._btHooked) {
+      window.HeadlessCheckout._btHooked = true;
+      const origCheckout = window.HeadlessCheckout.checkout;
+      if (typeof origCheckout === "function") {
+        window.HeadlessCheckout.checkout = async function(e) {
+          try { await syncCartDiscount(); } catch {}
+          return origCheckout.call(this, e);
+        };
+      }
     }
   }
 
