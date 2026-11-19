@@ -184,6 +184,8 @@
   });
 
   function attachObservers() {
+    hookShiprocketBuyCart();
+    hookFastrr();
     getRoots().forEach((r) => {
       if (!observedRoots.has(r)) {
         observedRoots.add(r);
@@ -194,6 +196,11 @@
           r.addEventListener("click", () => {
             setTimeout(syncCartDiscount, 300);
             setTimeout(syncCartDiscount, 700);
+          }, true);
+          r.addEventListener("change", (e) => {
+            if (e.target?.matches?.("input[type='number'], input[name='quantity'], [class*='qty']")) {
+              setTimeout(syncCartDiscount, 300);
+            }
           }, true);
         } catch {}
       }
@@ -281,10 +288,25 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
+          const basePrice = parseInt(wrap.dataset.basePrice || "0", 10) || 40000;
+          let props = {};
+          if (sel && sel.val > 0) {
+            const isFixed = sel.type === "FIXED_AMOUNT";
+            const origUnit = basePrice / 100;
+            const discountedUnit = isFixed
+              ? Math.max(0, origUnit - (sel.val / qty))
+              : Math.max(0, origUnit * (1 - sel.val / 100));
+            const roundUnit = Number(discountedUnit.toFixed(2));
+            props = {
+              _isYtBundle: "true",
+              _bundleItems: JSON.stringify([{ variantId: id, quantity: qty, price: roundUnit }])
+            };
+          }
+
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items: [{ id, quantity: qty }] }),
+            body: JSON.stringify({ items: [{ id, quantity: qty, properties: props }] }),
           });
           if (!res.ok) throw new Error();
 
@@ -365,11 +387,41 @@
         const baseVId = wrap.dataset.baseVariantId || $('[name="id"]')?.value;
         if (!baseVId) return alert("Please select a variant.");
 
-        const items = [{ id: parseInt(String(baseVId).replace(/\D/g, ""), 10), quantity: 1 }];
-        cbs.forEach((cb) => {
-          if (cb.checked && cb.dataset.variantId) {
-            items.push({ id: parseInt(String(cb.dataset.variantId).replace(/\D/g, ""), 10), quantity: 1 });
+        const companionCbs = cbs.filter((cb) => cb.checked && cb.dataset.variantId);
+        const allItemsCount = 1 + companionCbs.length;
+
+        const baseUnit = basePrice / 100;
+        const mainUnit = isFixed
+          ? Math.max(0, baseUnit - (discVal / allItemsCount))
+          : Math.max(0, baseUnit * (1 - (baseDisc || discVal) / 100));
+        const roundMainUnit = Number(mainUnit.toFixed(2));
+
+        const baseId = parseInt(String(baseVId).replace(/\D/g, ""), 10);
+        const items = [{
+          id: baseId,
+          quantity: 1,
+          properties: {
+            _isYtBundle: "true",
+            _bundleItems: JSON.stringify([{ variantId: baseId, quantity: 1, price: roundMainUnit }])
           }
+        }];
+
+        companionCbs.forEach((cb) => {
+          const cId = parseInt(String(cb.dataset.variantId).replace(/\D/g, ""), 10);
+          const cPrice = (parseInt(cb.dataset.price || "0", 10) || 0) / 100;
+          const cDisc = parseInt(cb.dataset.discount || "0", 10) || discVal;
+          const cUnit = isFixed
+            ? Math.max(0, cPrice - (discVal / allItemsCount))
+            : Math.max(0, cPrice * (1 - cDisc / 100));
+          const roundCUnit = Number(cUnit.toFixed(2));
+          items.push({
+            id: cId,
+            quantity: 1,
+            properties: {
+              _isYtBundle: "true",
+              _bundleItems: JSON.stringify([{ variantId: cId, quantity: 1, price: roundCUnit }])
+            }
+          });
         });
 
         btn.disabled = true;
@@ -490,19 +542,198 @@
     return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
-  // 6. SYNC CART DISCOUNT, CLUB WITH MANUAL COUPONS & UPDATE ESTIMATED TOTAL
+  // 6. SYNC FASTRR BUNDLE PROPERTIES & CART DISCOUNT (CLUB WITH COUPONS & FREEBIES)
+  function hookShiprocketBuyCart() {
+    if (typeof window.shiprocketCheckoutBuyCartHandler === "function" && !window.shiprocketCheckoutBuyCartHandler._btHooked) {
+      const origHandler = window.shiprocketCheckoutBuyCartHandler;
+      const wrapped = async function(...args) {
+        try {
+          await syncCartDiscount();
+        } catch {}
+        return origHandler.apply(this, args);
+      };
+      wrapped._btHooked = true;
+      window.shiprocketCheckoutBuyCartHandler = wrapped;
+    }
+  }
+
+  function hookFastrr() {
+    if (window.Fastrr && !window.Fastrr._btHooked) {
+      window.Fastrr._btHooked = true;
+      ["openCheckout", "buyCart", "checkout"].forEach((fn) => {
+        if (typeof window.Fastrr[fn] === "function") {
+          const orig = window.Fastrr[fn];
+          window.Fastrr[fn] = async function(...args) {
+            try { await syncCartDiscount(); } catch {}
+            return orig.apply(this, args);
+          };
+        }
+      });
+    }
+  }
+
+  let isFastrrSyncing = false;
+  async function syncFastrrProperties(cart, rules) {
+    if (isFastrrSyncing || !cart?.items?.length) return false;
+    isFastrrSyncing = true;
+    try {
+      const vRules = (rules || []).filter((r) => r.active && r.ruleType === "VOLUME" && r.tiers?.length);
+      const fRules = (rules || []).filter((r) => r.active && r.ruleType === "FBT" && r.fbtProducts?.length);
+
+      const changes = [];
+
+      for (const item of cart.items) {
+        const pId = String(item.product_id);
+        const vId = item.variant_id;
+        const qty = item.quantity;
+        const origUnit = (item.original_price || item.price) / 100;
+        let bestDiscUnit = origUnit;
+
+        // 1. Shopify native discount already present in cart
+        if (item.final_price && item.final_price < (item.original_price || item.price)) {
+          bestDiscUnit = item.final_price / 100;
+        }
+
+        // 2. Volume Discount Rules
+        for (const vr of vRules) {
+          const tId = String(vr.targetGid || "").replace(/\D/g, "");
+          const isMatch = vr.targetType === "PRODUCT"
+            ? pId === tId
+            : (vr.collectionProductIds || []).map(String).includes(pId);
+
+          if (isMatch) {
+            const matchingItems = cart.items.filter((it) =>
+              vr.targetType === "PRODUCT"
+                ? String(it.product_id) === tId
+                : (vr.collectionProductIds || []).map(String).includes(String(it.product_id))
+            );
+            const totalQty = matchingItems.reduce((s, it) => s + it.quantity, 0);
+            const tier = [...vr.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => totalQty >= x.minQuantity);
+            if (tier) {
+              const isFixed = tier.discountType === "FIXED_AMOUNT";
+              const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue || 0));
+              if (val > 0) {
+                const discUnit = isFixed
+                  ? Math.max(0, origUnit - (val / totalQty))
+                  : Math.max(0, origUnit * (1 - val / 100));
+                if (discUnit < bestDiscUnit) {
+                  bestDiscUnit = discUnit;
+                }
+              }
+            }
+          }
+        }
+
+        // 3. FBT Discount Rules
+        for (const fr of fRules) {
+          const tId = String(fr.targetGid || "").replace(/\D/g, "");
+          const cIds = fr.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
+          const targetItem = cart.items.find((it) => String(it.product_id) === tId);
+          const hasAll = targetItem && cIds.every((id) => cart.items.some((it) => String(it.product_id) === id));
+
+          if (hasAll && (pId === tId || cIds.includes(pId))) {
+            const isFixed = fr.discountType === "FIXED_AMOUNT";
+            const val = Number(isFixed ? fr.discountValue : (fr.mainDiscountPercent || fr.discountValue || 10));
+            if (val > 0) {
+              let fbtUnit = origUnit;
+              if (isFixed) {
+                const totalBundleItems = 1 + cIds.length;
+                fbtUnit = Math.max(0, origUnit - (val / totalBundleItems));
+              } else {
+                let pct = val;
+                if (pId === tId) {
+                  pct = Number(fr.mainDiscountPercent || val);
+                } else {
+                  const cp = fr.fbtProducts.find((p) => String(p.productId || "").replace(/\D/g, "") === pId);
+                  pct = Number(cp?.discountPercent || val);
+                }
+                fbtUnit = Math.max(0, origUnit * (1 - pct / 100));
+              }
+              if (fbtUnit < bestDiscUnit) {
+                bestDiscUnit = fbtUnit;
+              }
+            }
+          }
+        }
+
+        const currentProps = item.properties || {};
+        const hasYt = currentProps._isYtBundle === "true";
+        let currentPrice = null;
+        let currentQty = null;
+        try {
+          const parsed = JSON.parse(currentProps._bundleItems || "[]");
+          if (parsed.length) {
+            currentPrice = Number(parsed[0].price);
+            currentQty = Number(parsed[0].quantity);
+          }
+        } catch {}
+
+        if (bestDiscUnit < origUnit) {
+          const targetPrice = Number(bestDiscUnit.toFixed(2));
+          // If properties are missing, price changed, or quantity changed
+          if (!hasYt || currentPrice !== targetPrice || currentQty !== qty) {
+            changes.push({
+              id: item.key,
+              quantity: qty,
+              properties: {
+                ...currentProps,
+                _isYtBundle: "true",
+                _bundleItems: JSON.stringify([{ variantId: vId, quantity: qty, price: targetPrice }])
+              }
+            });
+          }
+        } else if (hasYt) {
+          // No discount applies anymore, strip _isYtBundle & _bundleItems
+          const cleanProps = { ...currentProps };
+          delete cleanProps._isYtBundle;
+          delete cleanProps._bundleItems;
+          changes.push({
+            id: item.key,
+            quantity: qty,
+            properties: cleanProps
+          });
+        }
+      }
+
+      if (changes.length > 0) {
+        for (const ch of changes) {
+          await fetch(ROOT + "cart/change.js?_bt=prop_sync", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(ch)
+          });
+        }
+        triggerRefresh();
+        return true;
+      }
+    } catch {} finally {
+      isFastrrSyncing = false;
+    }
+    return false;
+  }
+
   let syncLock = false;
   async function syncCartDiscount() {
     if (syncLock) return;
     syncLock = true;
     try {
+      hookShiprocketBuyCart();
+      hookFastrr();
+
       const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
       if (!res.ok) return;
-      const cart = await res.json();
+      let cart = await res.json();
 
       if (!cart?.items?.length) {
         clearDrawerEstimatedTotal();
         return;
+      }
+
+      const rules = await getRules();
+      const propsChanged = await syncFastrrProperties(cart, rules);
+      if (propsChanged) {
+        const uRes = await fetch(ROOT + "cart.js?_bt=" + Date.now());
+        if (uRes.ok) cart = await uRes.json();
       }
 
       let origTotal = cart.original_total_price || cart.total_price;
@@ -520,7 +751,6 @@
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
       // Check if rules calculate additional/active savings
-      const rules = await getRules();
       const { disc, code } = getActiveDiscount(cart, rules);
 
       if (disc > 0) {
@@ -532,19 +762,29 @@
       let manualCouponAmount = 0;
       if (Array.isArray(cart.cart_level_discount_applications) && cart.cart_level_discount_applications.length > 0) {
         cart.cart_level_discount_applications.forEach((app) => {
-          const amt = Number(app.total_allocated_amount || 0);
-          if (amt > 0) manualCouponAmount += amt;
+          const title = (app.title || "").toUpperCase();
+          if (!title.startsWith("FREEGIFT")) {
+            const amt = Number(app.total_allocated_amount || 0);
+            if (amt > 0) manualCouponAmount += amt;
+          }
         });
       }
 
-      // Check for Manual Coupons applied in Shiprocket drawer UI
+      // Check for Manual Coupons applied in Shiprocket drawer UI (excluding milestone free gifts)
       getRoots().forEach((root) => {
-        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount, .sr-discount");
-        if (coupAmtEl) {
-          const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
-          const cVal = Math.round(parseFloat(txt) * 100);
-          if (cVal > 0 && manualCouponAmount === 0) {
-            manualCouponAmount = cVal;
+        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
+        const discEl = root.querySelector(".sr-discount, .discount_wrapper, [class*='applied-coupon']");
+        const coupCodeEl = root.querySelector("#sr-cart-applied-coupon-title, .applied-coupon-code, .coupon-name");
+        const coupText = ((coupCodeEl?.textContent || "") + " " + (discEl?.textContent || "")).toUpperCase();
+
+        if (!coupText.includes("FREEGIFT")) {
+          const targetEl = coupAmtEl || discEl;
+          if (targetEl) {
+            const txt = (targetEl.textContent || "").replace(/[^\d.]/g, "");
+            const cVal = Math.round(parseFloat(txt) * 100);
+            if (cVal > 0 && manualCouponAmount === 0) {
+              manualCouponAmount = cVal;
+            }
           }
         }
       });
@@ -796,25 +1036,61 @@
     } catch {}
   }
 
-  // 8. INTERCEPT CART CALLS
+  // 8. INTERCEPT CART CALLS & CHECKOUT HOOKS
   const _fetch = window.fetch;
   window.fetch = function(...args) {
     const res = _fetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
-      if (/\/cart\/(add|change|update|clear)/.test(url) && !url.includes("_bt=")) {
-        res.then(() => setTimeout(syncCartDiscount, 300)).catch(() => {});
+      if (/\/cart(\.js|\/(add|change|update|clear))/i.test(url) && !url.includes("_bt=")) {
+        res.then(() => setTimeout(syncCartDiscount, 250)).catch(() => {});
       }
     } catch {}
     return res;
   };
 
-  document.addEventListener("click", (e) => {
-    const btn = e.target.closest("button, a, [role='button']");
+  const _xhrOpen = XMLHttpRequest.prototype.open;
+  const _xhrSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this._btUrl = typeof url === "string" ? url : "";
+    return _xhrOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this._btUrl && /\/cart(\.js|\/(add|change|update|clear))/i.test(this._btUrl) && !this._btUrl.includes("_bt=")) {
+      this.addEventListener("load", () => {
+        setTimeout(syncCartDiscount, 250);
+      });
+    }
+    return _xhrSend.apply(this, args);
+  };
+
+  window.addEventListener("message", (e) => {
+    try {
+      const data = e.data;
+      if (typeof data === "string" && (data.includes("cart") || data.includes("headless") || data.includes("checkout"))) {
+        setTimeout(syncCartDiscount, 300);
+      } else if (data && typeof data === "object") {
+        const trig = data.trigger || data.action || data.type || "";
+        if (/cart|checkout|headless|payment/i.test(trig)) {
+          setTimeout(syncCartDiscount, 300);
+        }
+      }
+    } catch {}
+  });
+
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button, a, [role='button'], .sr-headless-checkout, .sr-checkout-btn, #sr-cart-buy-now, .cart__checkout-button");
     if (!btn) return;
     const txt = (btn.textContent || "").trim().toLowerCase();
-    if (txt.includes("buy now") || txt.includes("checkout")) {
-      const hasManual = getRoots().some((r) => r.querySelector("#sr-cart-applied-coupon-amount, .sr-discount, .discount_wrapper, [class*='applied-coupon']"));
+    const isCheckout = txt.includes("buy now") || txt.includes("checkout") || btn.classList.contains("sr-headless-checkout") || btn.id === "sr-cart-buy-now";
+    if (isCheckout) {
+      const hasManual = getRoots().some((r) => {
+        const coupAmtEl = r.querySelector("#sr-cart-applied-coupon-amount");
+        const discEl = r.querySelector(".sr-discount, .discount_wrapper, [class*='applied-coupon']");
+        const coupCodeEl = r.querySelector("#sr-cart-applied-coupon-title, .applied-coupon-code, .coupon-name");
+        const coupText = ((coupCodeEl?.textContent || "") + " " + (discEl?.textContent || "")).toUpperCase();
+        return (coupAmtEl || discEl) && !coupText.includes("FREEGIFT");
+      });
       if (lastAppliedCode && !hasManual) {
         fetch(ROOT + "discount/" + encodeURIComponent(lastAppliedCode)).catch(() => {});
         document.cookie = "discount_code=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
@@ -825,15 +1101,20 @@
           window.Shiprocket?.applyCoupon?.(lastAppliedCode);
         } catch {}
       }
+      await syncCartDiscount();
     } else if (txt === "+" || txt === "-" || btn.className?.includes?.("qty") || btn.className?.includes?.("quantity")) {
-      setTimeout(syncCartDiscount, 400);
+      setTimeout(syncCartDiscount, 300);
+      setTimeout(syncCartDiscount, 700);
     }
   }, true);
 
   function start() {
+    hookShiprocketBuyCart();
+    hookFastrr();
     hydratePdp();
     setTimeout(syncCartDiscount, 500);
     attachObservers();
+    setInterval(hookShiprocketBuyCart, 1000);
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
