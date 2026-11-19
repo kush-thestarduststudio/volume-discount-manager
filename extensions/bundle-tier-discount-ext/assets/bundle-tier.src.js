@@ -83,30 +83,53 @@
     inp && (inp.value = String(qty), inp.dispatchEvent(new Event("change", { bubbles: true })));
   }
 
-  // Preapply code for checkout session while preserving manual coupons
-  let lastAppliedCode = null;
-  function preapply(code) {
-    if (code === lastAppliedCode) return;
-    lastAppliedCode = code;
-    try {
-      if (code) {
-        fetch(ROOT + "discount/" + encodeURIComponent(code)).catch(() => {});
-        document.cookie = "discount_code=" + encodeURIComponent(code) + "; path=/; max-age=86400";
-        document.cookie = "fastrrCouponCode=" + encodeURIComponent(code) + "; path=/; max-age=86400";
-        try { localStorage.setItem("fastrrCouponCode", code); } catch {}
-        try { sessionStorage.setItem("fastrrCouponCode", code); } catch {}
-        try { localStorage.setItem("discount_code", code); } catch {}
-        try {
-          window.Fastrr?.applyCoupon?.(code);
-          window.Fastrr?.cart?.applyCoupon?.(code);
-          window.Shiprocket?.applyCoupon?.(code);
-        } catch {}
-      } else {
-        document.cookie = "discount_code=; path=/; max-age=0";
-        document.cookie = "fastrrCouponCode=; path=/; max-age=0";
-        try { localStorage.removeItem("fastrrCouponCode"); } catch {}
-        try { sessionStorage.removeItem("fastrrCouponCode"); } catch {}
+  // Storefront API Cart Discount Mutation (Selleasy Method)
+  let lastMutatedCodeKey = null;
+  async function mutateCartDiscountCodes(cart, codes) {
+    const token = window.lbupsellToken || "c08d56cae211c47c68cb3cd03b882be8";
+    if (!token || !cart?.token) return;
+
+    const normalizedCodes = (codes || []).filter(Boolean);
+    const codeKey = normalizedCodes.sort().join(",");
+    if (codeKey === lastMutatedCodeKey) return;
+
+    const cartId = `gid://shopify/Cart/${cart.token}`;
+    const query = `
+      mutation cartDiscountCodesUpdate($id: ID!, $discountCodes: [String!]!) {
+        cartDiscountCodesUpdate(cartId: $id, discountCodes: $discountCodes) {
+          cart {
+            id
+            discountCodes {
+              code
+              applicable
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
       }
+    `;
+
+    try {
+      const res = await fetch(`https://${window.location.hostname}/api/2024-04/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Storefront-Access-Token": token,
+        },
+        body: JSON.stringify({
+          query,
+          variables: {
+            id: cartId,
+            discountCodes: normalizedCodes,
+          },
+        }),
+      });
+      const data = await res.json();
+      lastMutatedCodeKey = codeKey;
+      return data;
     } catch {}
   }
 
@@ -770,34 +793,47 @@
         });
       }
 
-      // Check for Manual Coupons applied in Shiprocket drawer UI (excluding milestone free gifts)
+      // Check for Manual Coupons applied in Shiprocket drawer UI (e.g. "₹40.00 saved with LOYAL")
       getRoots().forEach((root) => {
-        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
-        const discEl = root.querySelector(".sr-discount, .discount_wrapper, [class*='applied-coupon']");
-        const coupCodeEl = root.querySelector("#sr-cart-applied-coupon-title, .applied-coupon-code, .coupon-name");
-        const coupText = ((coupCodeEl?.textContent || "") + " " + (discEl?.textContent || "")).toUpperCase();
-
-        if (!coupText.includes("FREEGIFT")) {
-          const targetEl = coupAmtEl || discEl;
-          if (targetEl) {
-            const txt = (targetEl.textContent || "").replace(/[^\d.]/g, "");
-            const cVal = Math.round(parseFloat(txt) * 100);
-            if (cVal > 0 && manualCouponAmount === 0) {
-              manualCouponAmount = cVal;
+        // 1. Text search for "saved with" (e.g. "% ₹40.00 saved with LOYAL   Remove")
+        const allTextNodes = Array.from(root.querySelectorAll("*")).filter(
+          (el) => el.children.length === 0 && (el.textContent || "").includes("saved with")
+        );
+        allTextNodes.forEach((el) => {
+          const txt = (el.textContent || "").trim();
+          const m = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved with/i);
+          if (m && m[1]) {
+            const val = Math.round(parseFloat(m[1].replace(/,/g, "")) * 100);
+            if (val > 0 && manualCouponAmount === 0) {
+              manualCouponAmount = val;
             }
+          }
+        });
+
+        // 2. Element by ID in Shiprocket Smart Cart
+        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
+        const coupNameEl = root.querySelector("#sr-cart-applied-coupon-name, #sr-cart-applied-coupon-title");
+        const coupName = (coupNameEl?.textContent || "").trim().toUpperCase();
+
+        if (coupAmtEl && !coupName.startsWith("FREEGIFT")) {
+          const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
+          const cVal = Math.round(parseFloat(txt) * 100);
+          if (cVal > 0 && manualCouponAmount === 0) {
+            manualCouponAmount = cVal;
           }
         }
       });
 
       // CLUBBING: Deduct manual coupon from the already discounted item total!
       if (manualCouponAmount > 0) {
-        lastAppliedCode = null;
         finalTotal = Math.max(0, finalTotal - manualCouponAmount);
       }
 
-      // Preapply active rule code only if no other manual coupon is present
-      if (code && disc > 0 && manualCouponAmount === 0) {
-        preapply(code);
+      // Apply rule discount code to Shopify Cart via Storefront API (Selleasy method)
+      if (code && disc > 0) {
+        await mutateCartDiscountCodes(cart, [code]);
+      } else {
+        await mutateCartDiscountCodes(cart, []);
       }
 
       if (finalTotal < origTotal) {
@@ -1078,31 +1114,11 @@
     } catch {}
   });
 
-  document.addEventListener("click", async (e) => {
-    const btn = e.target.closest("button, a, [role='button'], .sr-headless-checkout, .sr-checkout-btn, #sr-cart-buy-now, .cart__checkout-button");
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("button, a, [role='button']");
     if (!btn) return;
     const txt = (btn.textContent || "").trim().toLowerCase();
-    const isCheckout = txt.includes("buy now") || txt.includes("checkout") || btn.classList.contains("sr-headless-checkout") || btn.id === "sr-cart-buy-now";
-    if (isCheckout) {
-      const hasManual = getRoots().some((r) => {
-        const coupAmtEl = r.querySelector("#sr-cart-applied-coupon-amount");
-        const discEl = r.querySelector(".sr-discount, .discount_wrapper, [class*='applied-coupon']");
-        const coupCodeEl = r.querySelector("#sr-cart-applied-coupon-title, .applied-coupon-code, .coupon-name");
-        const coupText = ((coupCodeEl?.textContent || "") + " " + (discEl?.textContent || "")).toUpperCase();
-        return (coupAmtEl || discEl) && !coupText.includes("FREEGIFT");
-      });
-      if (lastAppliedCode && !hasManual) {
-        fetch(ROOT + "discount/" + encodeURIComponent(lastAppliedCode)).catch(() => {});
-        document.cookie = "discount_code=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
-        document.cookie = "fastrrCouponCode=" + encodeURIComponent(lastAppliedCode) + "; path=/; max-age=86400";
-        try {
-          window.Fastrr?.applyCoupon?.(lastAppliedCode);
-          window.Fastrr?.cart?.applyCoupon?.(lastAppliedCode);
-          window.Shiprocket?.applyCoupon?.(lastAppliedCode);
-        } catch {}
-      }
-      await syncCartDiscount();
-    } else if (txt === "+" || txt === "-" || btn.className?.includes?.("qty") || btn.className?.includes?.("quantity")) {
+    if (txt === "+" || txt === "-" || btn.className?.includes?.("qty") || btn.className?.includes?.("quantity")) {
       setTimeout(syncCartDiscount, 300);
       setTimeout(syncCartDiscount, 700);
     }
