@@ -15,6 +15,7 @@
 
 <script>
   window.__btAutoInject = {{ block.settings.auto_inject | default: true }};
+  window.__btSfToken = window.lbupsellToken || "c08d56cae211c47c68cb3cd03b882be8";
   {% if config_data and config_data.rules %}
     window.__btRules = {{ config_data.rules | json }};
     try {

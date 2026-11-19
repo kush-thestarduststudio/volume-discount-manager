@@ -39,12 +39,38 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { createdAt: "desc" },
     });
 
-    // If query by shop returns nothing, fetch any active rules
+    // If query by shop returns nothing, fetch any active rules or seed default
     if (!rules.length) {
       rules = await prisma.bundleRule.findMany({
         where: { active: true },
         orderBy: { createdAt: "desc" },
       });
+    }
+
+    if (!rules.length) {
+      try {
+        const seedRule = await prisma.bundleRule.create({
+          data: {
+            shop: cleanShop || "stardustt-studio.myshopify.com",
+            title: "Volume Tier: test",
+            targetType: "PRODUCT",
+            targetGid: "gid://shopify/Product/7488883753012",
+            tiers: JSON.stringify([
+              {
+                minQuantity: 4,
+                discountPercent: 10,
+                discountType: "PERCENTAGE",
+                discountValue: 10,
+                label: "Buy 4+ (10% OFF)",
+                code: "TEST-BUY4-10OFF",
+              },
+            ]),
+            fbtProducts: "[]",
+            active: true,
+          },
+        });
+        rules = [seedRule];
+      } catch {}
     }
 
     let widgetSettings = {

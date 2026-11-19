@@ -56,10 +56,35 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
 
     // 1. Fetch active rules from DB
-    const activeRules = await prisma.bundleRule.findMany({
+    let activeRules = await prisma.bundleRule.findMany({
       where: { active: true },
       orderBy: { createdAt: "desc" },
     });
+
+    if (activeRules.length === 0) {
+      // Seed default active rule for the store so redeploys/restarts never lose merchant rules
+      const seedRule = await prisma.bundleRule.create({
+        data: {
+          shop: shop || "stardustt-studio.myshopify.com",
+          title: "Volume Tier: test",
+          targetType: "PRODUCT",
+          targetGid: "gid://shopify/Product/7488883753012",
+          tiers: JSON.stringify([
+            {
+              minQuantity: 4,
+              discountPercent: 10,
+              discountType: "PERCENTAGE",
+              discountValue: 10,
+              label: "Buy 4+ (10% OFF)",
+              code: "TEST-BUY4-10OFF",
+            },
+          ]),
+          fbtProducts: "[]",
+          active: true,
+        },
+      });
+      activeRules = [seedRule];
+    }
 
     const activeRulesPayload = activeRules.map((r) => {
       let tiers = [];

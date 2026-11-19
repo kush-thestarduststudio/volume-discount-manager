@@ -213,14 +213,40 @@
     }, 250);
   }
 
-  function clearDrawerEstimatedTotal() {
+  function clearDrawerEstimatedTotal(cart) {
     activeFinalCents = 0;
     activeOrigCents = 0;
-    if (totalTimer) clearInterval(totalTimer);
+    if (totalTimer) {
+      clearInterval(totalTimer);
+      totalTimer = null;
+    }
+    const currentTotalStr = cart?.total_price ? fmtPrice(cart.total_price) : "";
     getRoots().forEach((root) => {
-      Array.from(root.querySelectorAll(".summary-original-price")).forEach((el) => {
+      Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']")).forEach((el) => {
         el.style.display = "none";
       });
+
+      if (currentTotalStr) {
+        Array.from(root.querySelectorAll(".total-price, [class*='total-price'], .sr-sub-total")).forEach((el) => {
+          if (el.textContent !== currentTotalStr) {
+            el.textContent = currentTotalStr;
+          }
+        });
+
+        Array.from(root.querySelectorAll("*")).forEach((lbl) => {
+          if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
+            const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
+            if (container) {
+              const priceEls = Array.from(container.querySelectorAll("*")).filter(
+                (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
+              );
+              priceEls.forEach((p) => {
+                p.textContent = currentTotalStr;
+              });
+            }
+          }
+        });
+      }
     });
   }
 
@@ -521,14 +547,13 @@
     if (syncLock) return;
     syncLock = true;
     try {
-      clearAppCouponCookies();
-
       const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
       if (!res.ok) return;
       const cart = await res.json();
 
       if (!cart?.items?.length) {
-        clearDrawerEstimatedTotal();
+        clearDrawerEstimatedTotal(cart);
+        clearAppCouponCookies();
         return;
       }
 
@@ -548,7 +573,7 @@
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
       // 1. Calculate active app discount
-      const { disc } = getActiveDiscount(cart, rules);
+      const { disc, code: appDiscountCode } = getActiveDiscount(cart, rules);
       if (disc > 0) {
         const ruleFinal = Math.max(0, origTotal - disc);
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
@@ -556,12 +581,26 @@
 
       // 2. Discover and combine with any manual coupons (e.g. LOYAL) entered in Shiprocket Smart Cart / Fastrr
       let manualCouponAmount = 0;
+      const customerCoupons = [];
+
       if (Array.isArray(cart.cart_level_discount_applications) && cart.cart_level_discount_applications.length > 0) {
         cart.cart_level_discount_applications.forEach((app) => {
-          const title = (app.title || "").toUpperCase();
-          if (!title.startsWith("FREEGIFT")) {
+          const title = (app.title || "").trim();
+          const upper = title.toUpperCase();
+          if (upper && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
+            customerCoupons.push(title);
             const amt = Number(app.total_allocated_amount || 0);
             if (amt > 0) manualCouponAmount += amt;
+          }
+        });
+      }
+
+      if (Array.isArray(cart.discount_codes)) {
+        cart.discount_codes.forEach((dc) => {
+          const c = (dc.code || "").trim();
+          const upper = c.toUpperCase();
+          if (c && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
+            customerCoupons.push(c);
           }
         });
       }
@@ -572,27 +611,95 @@
         );
         allTextNodes.forEach((el) => {
           const txt = (el.textContent || "").trim();
-          const m = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved with/i);
-          if (m && m[1]) {
-            const val = Math.round(parseFloat(m[1].replace(/,/g, "")) * 100);
-            if (val > 0 && manualCouponAmount === 0) {
-              manualCouponAmount = val;
+          const m = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved with\s*([A-Za-z0-9_-]+)?/i);
+          if (m) {
+            if (m[1]) {
+              const val = Math.round(parseFloat(m[1].replace(/,/g, "")) * 100);
+              if (val > 0 && manualCouponAmount === 0) {
+                manualCouponAmount = val;
+              }
+            }
+            if (m[3]) {
+              const c = m[3].trim();
+              const upper = c.toUpperCase();
+              if (c && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
+                customerCoupons.push(c);
+              }
             }
           }
         });
 
         const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
         const coupNameEl = root.querySelector("#sr-cart-applied-coupon-name, #sr-cart-applied-coupon-title");
-        const coupName = (coupNameEl?.textContent || "").trim().toUpperCase();
+        const coupName = (coupNameEl?.textContent || "").trim();
+        const upper = coupName.toUpperCase();
 
-        if (coupAmtEl && !coupName.startsWith("FREEGIFT")) {
-          const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
-          const cVal = Math.round(parseFloat(txt) * 100);
-          if (cVal > 0 && manualCouponAmount === 0) {
-            manualCouponAmount = cVal;
+        if (coupName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
+          customerCoupons.push(coupName);
+          if (coupAmtEl) {
+            const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
+            const cVal = Math.round(parseFloat(txt) * 100);
+            if (cVal > 0 && manualCouponAmount === 0) {
+              manualCouponAmount = cVal;
+            }
           }
         }
       });
+
+      // 3. Storefront API Sync (Exact mechanism Selleasy uses to combine with Shopify Cart & Fastrr Checkout)
+      const targetCodes = [];
+      if (disc > 0 && appDiscountCode) {
+        targetCodes.push(appDiscountCode);
+      }
+      customerCoupons.forEach((c) => {
+        if (c && !targetCodes.includes(c)) {
+          targetCodes.push(c);
+        }
+      });
+
+      const sfToken = window.__btSfToken || window.lbupsellToken || "c08d56cae211c47c68cb3cd03b882be8";
+      if (cart.token && sfToken) {
+        const cartGid = cart.token.startsWith("gid://") ? cart.token : `gid://shopify/Cart/${cart.token}`;
+        const codeKey = `${cart.token}:${targetCodes.sort().join(",")}`;
+        if (window.__btLastCartCodeKey !== codeKey) {
+          window.__btLastCartCodeKey = codeKey;
+          fetch(`https://${window.location.hostname}/api/2024-01/graphql.json`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Storefront-Access-Token": sfToken,
+            },
+            body: JSON.stringify({
+              query: `mutation cartDiscountCodesUpdate($cartId: ID!, $discountCodes: [String!]!) {
+                cartDiscountCodesUpdate(cartId: $cartId, discountCodes: $discountCodes) {
+                  cart {
+                    id
+                    discountCodes {
+                      code
+                      applicable
+                    }
+                  }
+                  userErrors { field message }
+                }
+              }`,
+              variables: {
+                cartId: cartGid,
+                discountCodes: targetCodes,
+              },
+            }),
+          }).catch(() => {});
+        }
+      }
+
+      // Fastrr / Shiprocket Cookie Management
+      if (disc > 0 && appDiscountCode) {
+        if (!customerCoupons.length) {
+          document.cookie = `discount_code=${appDiscountCode}; path=/; SameSite=None; Secure`;
+          document.cookie = `fastrrCouponCode=${appDiscountCode}; path=/; SameSite=None; Secure`;
+        }
+      } else {
+        clearAppCouponCookies();
+      }
 
       // Combine: Deduct manual coupon from total alongside volume discount!
       if (manualCouponAmount > 0) {
@@ -602,7 +709,7 @@
       if (finalTotal < origTotal) {
         setDrawerEstimatedTotal(finalTotal, origTotal);
       } else {
-        clearDrawerEstimatedTotal();
+        clearDrawerEstimatedTotal(cart);
       }
     } catch {} finally {
       syncLock = false;
