@@ -8,13 +8,39 @@ const FALLBACK_RULES = [
     targetType: "PRODUCT",
     targetGid: "gid://shopify/Product/7488883753012",
     ruleType: "VOLUME",
+    discountType: "PERCENTAGE",
+    discountValue: 10,
     mainDiscountPercent: 0,
     tiers: [
-      { minQuantity: 2, discountPercent: 10, label: "Buy 2 - Save 10%" },
-      { minQuantity: 3, discountPercent: 15, label: "Buy 3 - Save 15%" },
-      { minQuantity: 4, discountPercent: 20, label: "Buy 4 - Save 20%" },
+      { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
+      { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
+      { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
+      { minQuantity: 6, discountPercent: 25, discountType: "PERCENTAGE", discountValue: 25, label: "Buy 6 - Save 25%", code: "TEST-BUY6-25OFF" },
+      { minQuantity: 8, discountPercent: 30, discountType: "PERCENTAGE", discountValue: 30, label: "Buy 8 - Save 30%", code: "TEST-BUY8-30OFF" },
     ],
     fbtProducts: [],
+    active: true,
+  },
+  {
+    id: "cmw-stardust-fbt-test",
+    title: "Bundle for: test",
+    targetType: "PRODUCT",
+    targetGid: "gid://shopify/Product/7488883753012",
+    ruleType: "FBT",
+    discountType: "PERCENTAGE",
+    discountValue: 15,
+    mainDiscountPercent: 15,
+    discountCode: "BUNDLE-TEST-15OFF",
+    tiers: [],
+    fbtProducts: [
+      {
+        productId: "8245592817876",
+        variantId: "44722881888468",
+        title: "7 Chakra and Hematite Ring Bracelet",
+        priceCents: 99800,
+        discountPercent: 15,
+      },
+    ],
     active: true,
   },
 ];
@@ -168,11 +194,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       };
     });
 
+    const effectiveRules = (parsedRules && parsedRules.length > 0) ? parsedRules : FALLBACK_RULES;
+
     return new Response(
       JSON.stringify({
         ok: true,
         shop: cleanShop || "stardustt-studio.myshopify.com",
-        rules: parsedRules,
+        rules: effectiveRules,
         settings: widgetSettings,
       }),
       { headers }

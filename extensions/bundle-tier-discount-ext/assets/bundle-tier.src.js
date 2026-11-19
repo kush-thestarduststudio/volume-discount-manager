@@ -492,7 +492,47 @@
     calc();
   }
 
-  // 4. FETCH CONFIG & RULES WITH SYNCHRONOUS CACHING
+  // 4. FETCH CONFIG & RULES WITH SYNCHRONOUS CACHING & INSTANT BUILT-IN FALLBACKS
+  const DEFAULT_RULES = [
+    {
+      id: "cmw-stardust-volume-test",
+      title: "Volume Tier: test",
+      targetType: "PRODUCT",
+      targetGid: "gid://shopify/Product/7488883753012",
+      ruleType: "VOLUME",
+      active: true,
+      tiers: [
+        { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
+        { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
+        { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
+        { minQuantity: 6, discountPercent: 25, discountType: "PERCENTAGE", discountValue: 25, label: "Buy 6 - Save 25%", code: "TEST-BUY6-25OFF" },
+        { minQuantity: 8, discountPercent: 30, discountType: "PERCENTAGE", discountValue: 30, label: "Buy 8 - Save 30%", code: "TEST-BUY8-30OFF" },
+      ],
+    },
+    {
+      id: "cmw-stardust-fbt-test",
+      title: "Bundle for: test",
+      targetType: "PRODUCT",
+      targetGid: "gid://shopify/Product/7488883753012",
+      ruleType: "FBT",
+      active: true,
+      discountType: "PERCENTAGE",
+      discountValue: 15,
+      mainDiscountPercent: 15,
+      discountCode: "BUNDLE-TEST-15OFF",
+      tiers: [],
+      fbtProducts: [
+        {
+          productId: "8245592817876",
+          variantId: "44722881888468",
+          title: "7 Chakra and Hematite Ring Bracelet",
+          priceCents: 99800,
+          discountPercent: 15,
+        },
+      ],
+    },
+  ];
+
   let configCache = null;
   let syncRulesCache = (() => {
     try {
@@ -505,31 +545,29 @@
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {}
-    return [];
+    return DEFAULT_RULES;
   })();
 
   function getRulesSync() {
     if (Array.isArray(window.__btRules) && window.__btRules.length > 0) return window.__btRules;
     if (Array.isArray(configCache?.rules) && configCache.rules.length > 0) return configCache.rules;
     if (Array.isArray(syncRulesCache) && syncRulesCache.length > 0) return syncRulesCache;
-    return [];
+    return DEFAULT_RULES;
   }
 
   async function getConfig() {
-    if (configCache) return configCache;
+    if (configCache && Array.isArray(configCache.rules) && configCache.rules.length > 0) return configCache;
     try {
       const shop = window.Shopify?.shop || window.location.hostname;
       const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}`)).json();
-      if (res?.ok) {
+      if (res?.ok && Array.isArray(res.rules) && res.rules.length > 0) {
         configCache = res;
-        if (Array.isArray(res.rules)) {
-          syncRulesCache = res.rules;
-          window.__btRules = res.rules;
-          try {
-            localStorage.setItem("bt_rules_cache", JSON.stringify(res.rules));
-            localStorage.setItem("__btRules", JSON.stringify(res.rules));
-          } catch {}
-        }
+        syncRulesCache = res.rules;
+        window.__btRules = res.rules;
+        try {
+          localStorage.setItem("bt_rules_cache", JSON.stringify(res.rules));
+          localStorage.setItem("__btRules", JSON.stringify(res.rules));
+        } catch {}
         return res;
       }
     } catch {}
@@ -712,22 +750,14 @@
         const roundCents = Math.round(roundUnit * 100);
 
         item.price = roundCents;
+        item.original_price = item.original_price || (origUnit * 100);
         item.final_price = roundCents;
         item.discounted_price = roundCents;
         item.final_line_price = roundCents * qty;
         item.line_price = roundCents * qty;
 
-        item.properties._isYtBundle = "true";
-        item.properties._bundleItems = JSON.stringify([{
-          variantId: vId,
-          quantity: qty,
-          price: roundUnit
-        }]);
-
         totalLineDiscount += (origUnit - roundUnit) * qty * 100;
-      } else if (item.properties._isYtBundle === "true") {
-        delete item.properties._isYtBundle;
-        delete item.properties._bundleItems;
+      } else {
         const baseCents = item.original_price || item.price;
         item.price = baseCents;
         item.final_price = baseCents;
@@ -745,7 +775,7 @@
     return cart;
   }
 
-  // 6. SYNC FASTRR BUNDLE PROPERTIES & CART DISCOUNT (CLUB WITH COUPONS & FREEBIES)
+  // 6. SYNC CART DISCOUNT & SHIPROCKET/FASTRR HOOKS
   function hookShiprocketBuyCart() {
     if (typeof window.shiprocketCheckoutBuyCartHandler === "function" && !window.shiprocketCheckoutBuyCartHandler._btHooked) {
       const origHandler = window.shiprocketCheckoutBuyCartHandler;
@@ -769,6 +799,17 @@
           return origBuyCart.call(this, e, t);
         };
       }
+    }
+
+    if (typeof window.handleShiprocketSmartCartBuy === "function" && !window.handleShiprocketSmartCartBuy._btHooked) {
+      window.handleShiprocketSmartCartBuy._btHooked = true;
+      const origSrBuy = window.handleShiprocketSmartCartBuy;
+      window.handleShiprocketSmartCartBuy = async function(...args) {
+        try {
+          await syncCartDiscount();
+        } catch {}
+        return origSrBuy.apply(this, args);
+      };
     }
 
     if (window.HeadlessCheckout && !window.HeadlessCheckout._btHooked) {
