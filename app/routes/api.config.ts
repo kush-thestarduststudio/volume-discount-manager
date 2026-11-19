@@ -1,50 +1,6 @@
 import { type LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 
-const FALLBACK_RULES = [
-  {
-    id: "cmw-stardust-volume-test",
-    title: "Volume Tier: test",
-    targetType: "PRODUCT",
-    targetGid: "gid://shopify/Product/7488883753012",
-    ruleType: "VOLUME",
-    discountType: "PERCENTAGE",
-    discountValue: 10,
-    mainDiscountPercent: 0,
-    tiers: [
-      { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
-      { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
-      { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
-      { minQuantity: 6, discountPercent: 25, discountType: "PERCENTAGE", discountValue: 25, label: "Buy 6 - Save 25%", code: "TEST-BUY6-25OFF" },
-      { minQuantity: 8, discountPercent: 30, discountType: "PERCENTAGE", discountValue: 30, label: "Buy 8 - Save 30%", code: "TEST-BUY8-30OFF" },
-    ],
-    fbtProducts: [],
-    active: true,
-  },
-  {
-    id: "cmw-stardust-fbt-test",
-    title: "Bundle for: test",
-    targetType: "PRODUCT",
-    targetGid: "gid://shopify/Product/7488883753012",
-    ruleType: "FBT",
-    discountType: "PERCENTAGE",
-    discountValue: 15,
-    mainDiscountPercent: 15,
-    discountCode: "BUNDLE-TEST-15OFF",
-    tiers: [],
-    fbtProducts: [
-      {
-        productId: "8245592817876",
-        variantId: "44722881888468",
-        title: "7 Chakra and Hematite Ring Bracelet",
-        priceCents: 99800,
-        discountPercent: 15,
-      },
-    ],
-    active: true,
-  },
-];
-
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const shopParam = url.searchParams.get("shop") || "";
@@ -54,11 +10,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept",
     "Content-Type": "application/json",
-    "Cache-Control": "public, max-age=30, stale-while-revalidate=120",
+    "Cache-Control": "public, max-age=15, stale-while-revalidate=60",
   };
 
   if (!shopParam) {
-    return new Response(JSON.stringify({ ok: true, shop: "stardustt-studio.myshopify.com", rules: FALLBACK_RULES }), { headers });
+    return new Response(JSON.stringify({ ok: true, rules: [] }), { headers });
   }
 
   // Extract clean shop domain (handles full URL, custom domains, or myshopify)
@@ -153,29 +109,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       const bundleVal = Number(isFixedFbt ? fbtDiscountValue : (fbtDiscountValue || mainDiscountPercent || fbtProducts[0]?.discountPercent || 10));
       const discountCode = isFbt ? `BUNDLE-${cleanName}-${bundleVal}OFF` : "";
 
-      const enhancedTiers = tiers.map((t: any) => {
+      // ONLY use the exact tiers created in the database without any artificial injection
+      const mappedTiers = tiers.map((t: any) => {
+        const minQ = Number(t.minQuantity || 1);
         const isFixed = t.discountType === "FIXED_AMOUNT";
-        const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 10));
+        const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 0));
         return {
           ...t,
+          minQuantity: minQ,
           discountType: isFixed ? "FIXED_AMOUNT" : "PERCENTAGE",
           discountValue: val,
           discountPercent: isFixed ? 0 : val,
-          code: `${cleanName}-BUY${t.minQuantity}-${val}OFF`,
+          label: t.label || `Buy ${minQ} - Save ${isFixed ? `₹${val}` : `${val}%`}`,
+          code: `${cleanName}-BUY${minQ}-${val}OFF`,
         };
       });
-
-      // Ensure standard volume tiers (2+, 3+, 4+) are available for volume rules
-      if (!isFbt && enhancedTiers.length > 0 && !enhancedTiers.some((t: any) => t.minQuantity === 2)) {
-        enhancedTiers.unshift({
-          minQuantity: 2,
-          discountType: "PERCENTAGE",
-          discountValue: 10,
-          discountPercent: 10,
-          label: "Buy 2 - Save 10%",
-          code: `${cleanName}-BUY2-10OFF`
-        });
-      }
 
       return {
         id: r.id,
@@ -183,24 +131,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         targetType: r.targetType,
         targetGid: r.targetGid,
         ruleType: isFbt ? "FBT" : "VOLUME",
-        discountType: isFbt ? fbtDiscountType : (enhancedTiers[0]?.discountType || "PERCENTAGE"),
-        discountValue: isFbt ? bundleVal : (enhancedTiers[0]?.discountValue || 0),
+        discountType: isFbt ? fbtDiscountType : (mappedTiers[0]?.discountType || "PERCENTAGE"),
+        discountValue: isFbt ? bundleVal : (mappedTiers[0]?.discountValue || 0),
         mainDiscountPercent,
         triggerProduct,
         discountCode,
-        tiers: enhancedTiers,
+        tiers: mappedTiers,
         fbtProducts,
         active: r.active,
       };
     });
 
-    const effectiveRules = (parsedRules && parsedRules.length > 0) ? parsedRules : FALLBACK_RULES;
-
     return new Response(
       JSON.stringify({
         ok: true,
-        shop: cleanShop || "stardustt-studio.myshopify.com",
-        rules: effectiveRules,
+        shop: cleanShop,
+        rules: parsedRules,
         settings: widgetSettings,
       }),
       { headers }
@@ -210,8 +156,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return new Response(
       JSON.stringify({
         ok: true,
-        shop: cleanShop || "stardustt-studio.myshopify.com",
-        rules: FALLBACK_RULES,
+        shop: cleanShop,
+        rules: [],
       }),
       { headers }
     );

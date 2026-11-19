@@ -31,7 +31,7 @@
     return roots;
   }
 
-  // Open Shiprocket Smart Cart Drawer
+  // Open Shiprocket Smart Cart Drawer natively
   function openShiprocketDrawer() {
     try {
       window.updateMiniCartSection?.();
@@ -83,74 +83,6 @@
     inp && (inp.value = String(qty), inp.dispatchEvent(new Event("change", { bubbles: true })));
   }
 
-  // Storefront API Cart Discount Mutation (Selleasy Method)
-  // Preserves ALL existing customer discount codes (e.g. LOYAL) and merges with bundle discount!
-  let lastMutatedCodeKey = null;
-  async function mutateCartDiscountCodes(cart, codes) {
-    const token = window.lbupsellToken || "c08d56cae211c47c68cb3cd03b882be8";
-    if (!token || !cart?.token) return;
-
-    // Collect ALL existing discount codes present in the cart
-    const existingCodes = [];
-    if (Array.isArray(cart.discount_codes)) {
-      cart.discount_codes.forEach((d) => {
-        const c = d?.code || (typeof d === "string" ? d : "");
-        if (c) existingCodes.push(c);
-      });
-    }
-    if (Array.isArray(cart.cart_level_discount_applications)) {
-      cart.cart_level_discount_applications.forEach((a) => {
-        const t = a?.title;
-        if (t && !t.startsWith("[Volume") && !t.startsWith("[Bundle") && !t.includes("FREEGIFT")) {
-          existingCodes.push(t);
-        }
-      });
-    }
-
-    const merged = Array.from(new Set([...existingCodes, ...(codes || [])])).filter(Boolean);
-    const codeKey = merged.slice().sort().join(",");
-    if (codeKey === lastMutatedCodeKey) return;
-
-    const cartId = `gid://shopify/Cart/${cart.token}`;
-    const query = `
-      mutation cartDiscountCodesUpdate($id: ID!, $discountCodes: [String!]!) {
-        cartDiscountCodesUpdate(cartId: $id, discountCodes: $discountCodes) {
-          cart {
-            id
-            discountCodes {
-              code
-              applicable
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    try {
-      const res = await fetch(`https://${window.location.hostname}/api/2024-04/graphql.json`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Storefront-Access-Token": token,
-        },
-        body: JSON.stringify({
-          query,
-          variables: {
-            id: cartId,
-            discountCodes: merged,
-          },
-        }),
-      });
-      const data = await res.json();
-      lastMutatedCodeKey = codeKey;
-      return data;
-    } catch {}
-  }
-
   // 1. ESTIMATED TOTAL STRIKETHROUGH & FINAL PRICE IN SHIPROCKET SHADOW DOM
   let activeFinalCents = 0;
   let activeOrigCents = 0;
@@ -164,7 +96,7 @@
 
     const roots = getRoots();
     roots.forEach((root) => {
-      // 1. Direct update to Shiprocket Smart Cart designated elements inside this root
+      // Direct update to Shiprocket Smart Cart designated elements inside this root
       const totalEls = Array.from(root.querySelectorAll(".total-price, [class*='total-price']"));
       const origEls = Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']"));
       const subTotalEls = Array.from(root.querySelectorAll(".sr-sub-total"));
@@ -191,7 +123,7 @@
         }
       });
 
-      // 2. Generic fallback: check any label with "Estimated Total" inside this root
+      // Generic fallback: check any label with "Estimated Total" inside this root
       Array.from(root.querySelectorAll("*")).forEach((lbl) => {
         if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
           const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
@@ -225,8 +157,6 @@
   });
 
   function attachObservers() {
-    hookShiprocketBuyCart();
-    hookFastrr();
     getRoots().forEach((r) => {
       if (!observedRoots.has(r)) {
         observedRoots.add(r);
@@ -329,25 +259,10 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
-          const basePrice = parseInt(wrap.dataset.basePrice || "0", 10) || 40000;
-          let props = {};
-          if (sel && sel.val > 0) {
-            const isFixed = sel.type === "FIXED_AMOUNT";
-            const origUnit = basePrice / 100;
-            const discountedUnit = isFixed
-              ? Math.max(0, origUnit - (sel.val / qty))
-              : Math.max(0, origUnit * (1 - sel.val / 100));
-            const roundUnit = Number(discountedUnit.toFixed(2));
-            props = {
-              _isYtBundle: "true",
-              _bundleItems: JSON.stringify([{ variantId: id, quantity: qty, price: roundUnit }])
-            };
-          }
-
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items: [{ id, quantity: qty, properties: props }] }),
+            body: JSON.stringify({ items: [{ id, quantity: qty }] }),
           });
           if (!res.ok) throw new Error();
 
@@ -429,40 +344,12 @@
         if (!baseVId) return alert("Please select a variant.");
 
         const companionCbs = cbs.filter((cb) => cb.checked && cb.dataset.variantId);
-        const allItemsCount = 1 + companionCbs.length;
-
-        const baseUnit = basePrice / 100;
-        const mainUnit = isFixed
-          ? Math.max(0, baseUnit - (discVal / allItemsCount))
-          : Math.max(0, baseUnit * (1 - (baseDisc || discVal) / 100));
-        const roundMainUnit = Number(mainUnit.toFixed(2));
-
         const baseId = parseInt(String(baseVId).replace(/\D/g, ""), 10);
-        const items = [{
-          id: baseId,
-          quantity: 1,
-          properties: {
-            _isYtBundle: "true",
-            _bundleItems: JSON.stringify([{ variantId: baseId, quantity: 1, price: roundMainUnit }])
-          }
-        }];
+        const items = [{ id: baseId, quantity: 1 }];
 
         companionCbs.forEach((cb) => {
           const cId = parseInt(String(cb.dataset.variantId).replace(/\D/g, ""), 10);
-          const cPrice = (parseInt(cb.dataset.price || "0", 10) || 0) / 100;
-          const cDisc = parseInt(cb.dataset.discount || "0", 10) || discVal;
-          const cUnit = isFixed
-            ? Math.max(0, cPrice - (discVal / allItemsCount))
-            : Math.max(0, cPrice * (1 - cDisc / 100));
-          const roundCUnit = Number(cUnit.toFixed(2));
-          items.push({
-            id: cId,
-            quantity: 1,
-            properties: {
-              _isYtBundle: "true",
-              _bundleItems: JSON.stringify([{ variantId: cId, quantity: 1, price: roundCUnit }])
-            }
-          });
+          items.push({ id: cId, quantity: 1 });
         });
 
         btn.disabled = true;
@@ -492,47 +379,7 @@
     calc();
   }
 
-  // 4. FETCH CONFIG & RULES WITH SYNCHRONOUS CACHING & INSTANT BUILT-IN FALLBACKS
-  const DEFAULT_RULES = [
-    {
-      id: "cmw-stardust-volume-test",
-      title: "Volume Tier: test",
-      targetType: "PRODUCT",
-      targetGid: "gid://shopify/Product/7488883753012",
-      ruleType: "VOLUME",
-      active: true,
-      tiers: [
-        { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
-        { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
-        { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
-        { minQuantity: 6, discountPercent: 25, discountType: "PERCENTAGE", discountValue: 25, label: "Buy 6 - Save 25%", code: "TEST-BUY6-25OFF" },
-        { minQuantity: 8, discountPercent: 30, discountType: "PERCENTAGE", discountValue: 30, label: "Buy 8 - Save 30%", code: "TEST-BUY8-30OFF" },
-      ],
-    },
-    {
-      id: "cmw-stardust-fbt-test",
-      title: "Bundle for: test",
-      targetType: "PRODUCT",
-      targetGid: "gid://shopify/Product/7488883753012",
-      ruleType: "FBT",
-      active: true,
-      discountType: "PERCENTAGE",
-      discountValue: 15,
-      mainDiscountPercent: 15,
-      discountCode: "BUNDLE-TEST-15OFF",
-      tiers: [],
-      fbtProducts: [
-        {
-          productId: "8245592817876",
-          variantId: "44722881888468",
-          title: "7 Chakra and Hematite Ring Bracelet",
-          priceCents: 99800,
-          discountPercent: 15,
-        },
-      ],
-    },
-  ];
-
+  // 4. FETCH CONFIG & RULES (STRICTLY FROM DATABASE / NO SYNTHETIC FALLBACKS)
   let configCache = null;
   let syncRulesCache = (() => {
     try {
@@ -545,22 +392,22 @@
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {}
-    return DEFAULT_RULES;
+    return [];
   })();
 
   function getRulesSync() {
     if (Array.isArray(window.__btRules) && window.__btRules.length > 0) return window.__btRules;
     if (Array.isArray(configCache?.rules) && configCache.rules.length > 0) return configCache.rules;
     if (Array.isArray(syncRulesCache) && syncRulesCache.length > 0) return syncRulesCache;
-    return DEFAULT_RULES;
+    return [];
   }
 
   async function getConfig() {
-    if (configCache && Array.isArray(configCache.rules) && configCache.rules.length > 0) return configCache;
+    if (configCache && Array.isArray(configCache.rules)) return configCache;
     try {
       const shop = window.Shopify?.shop || window.location.hostname;
       const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}`)).json();
-      if (res?.ok && Array.isArray(res.rules) && res.rules.length > 0) {
+      if (res?.ok && Array.isArray(res.rules)) {
         configCache = res;
         syncRulesCache = res.rules;
         window.__btRules = res.rules;
@@ -576,10 +423,10 @@
 
   async function getRules() {
     const cfg = await getConfig();
-    return Array.isArray(cfg?.rules) && cfg.rules.length > 0 ? cfg.rules : getRulesSync();
+    return Array.isArray(cfg?.rules) ? cfg.rules : getRulesSync();
   }
 
-  // 5. FIND APPLICABLE DISCOUNT (MAX SAVINGS CONFLICT RESOLUTION)
+  // 5. FIND APPLICABLE DISCOUNT (FOR SUMMARY ESTIMATE ONLY)
   const cleanCode = (t) =>
     (t || "")
       .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
@@ -644,352 +491,19 @@
     }
 
     if (!candidates.length) return { disc: 0, code: null };
-
-    // Max Savings Rule: Highest discount wins!
     candidates.sort((a, b) => b.disc - a.disc);
     return { disc: candidates[0].disc, code: candidates[0].code };
   }
 
-  // IN-MEMORY CART TRANSFORMATION
-  // Injects _isYtBundle & _bundleItems with discounted price directly into cart.items
-  // so Fastrr's z(e, t) maps `price: discountedUnit` instantly with 0ms race condition!
-  function transformCartResponse(cart) {
-    if (!cart || !Array.isArray(cart.items)) return cart;
-    const rules = getRulesSync() || [];
-
-    const vRules = rules.filter(r => r.active && r.ruleType === "VOLUME" && r.tiers?.length);
-    const fRules = rules.filter(r => r.active && r.ruleType === "FBT" && r.fbtProducts?.length);
-
-    let totalLineDiscount = 0;
-
-    for (const item of cart.items) {
-      const pId = String(item.product_id);
-      const vId = item.variant_id;
-      const qty = item.quantity;
-      const origUnit = (item.original_price || item.price) / 100;
-      let bestUnit = origUnit;
-
-      // 0. Check Shopify native discount / automatic discount already applied to this line
-      if (item.final_price && item.final_price < (item.original_price || item.price)) {
-        bestUnit = Math.min(bestUnit, item.final_price / 100);
-      }
-      if (item.discounted_price && item.discounted_price < (item.original_price || item.price)) {
-        bestUnit = Math.min(bestUnit, item.discounted_price / 100);
-      }
-
-      // 1. Volume Rules
-      for (const vr of vRules) {
-        const tId = String(vr.targetGid || "").replace(/\D/g, "");
-        const isMatch = vr.targetType === "PRODUCT"
-          ? pId === tId
-          : (vr.collectionProductIds || []).map(String).includes(pId);
-
-        if (isMatch) {
-          const matchingItems = cart.items.filter(it =>
-            vr.targetType === "PRODUCT"
-              ? String(it.product_id) === tId
-              : (vr.collectionProductIds || []).map(String).includes(String(it.product_id))
-          );
-          const totalQty = matchingItems.reduce((s, it) => s + it.quantity, 0);
-          let tier = [...vr.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find(x => totalQty >= x.minQuantity);
-          if (!tier && totalQty >= 2 && !vr.tiers.some(x => x.minQuantity <= totalQty)) {
-            // Default 10% volume discount for 2+ items if volume rule is active on product
-            tier = { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10 };
-          }
-          if (tier) {
-            const isFixed = tier.discountType === "FIXED_AMOUNT";
-            const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue || 0));
-            if (val > 0) {
-              const discUnit = isFixed
-                ? Math.max(0, origUnit - (val / totalQty))
-                : Math.max(0, origUnit * (1 - val / 100));
-              if (discUnit < bestUnit) {
-                bestUnit = discUnit;
-              }
-            }
-          }
-        }
-      }
-
-      // 2. FBT Rules
-      for (const fr of fRules) {
-        const tId = String(fr.targetGid || "").replace(/\D/g, "");
-        const cIds = fr.fbtProducts.map(p => String(p.productId || "").replace(/\D/g, ""));
-        const targetItem = cart.items.find(it => String(it.product_id) === tId);
-        const hasAll = targetItem && cIds.every(id => cart.items.some(it => String(it.product_id) === id));
-
-        if (hasAll && (pId === tId || cIds.includes(pId))) {
-          const isFixed = fr.discountType === "FIXED_AMOUNT";
-          const val = Number(isFixed ? fr.discountValue : (fr.mainDiscountPercent || fr.discountValue || 10));
-          if (val > 0) {
-            let fbtUnit = origUnit;
-            if (isFixed) {
-              const totalBundleItems = 1 + cIds.length;
-              fbtUnit = Math.max(0, origUnit - (val / totalBundleItems));
-            } else {
-              let pct = val;
-              if (pId === tId) {
-                pct = Number(fr.mainDiscountPercent || val);
-              } else {
-                const cp = fr.fbtProducts.find(p => String(p.productId || "").replace(/\D/g, "") === pId);
-                pct = Number(cp?.discountPercent || val);
-              }
-              fbtUnit = Math.max(0, origUnit * (1 - pct / 100));
-            }
-            if (fbtUnit < bestUnit) {
-              bestUnit = fbtUnit;
-            }
-          }
-        }
-      }
-
-      item.properties = item.properties || {};
-
-      if (bestUnit < origUnit) {
-        const roundUnit = Number(bestUnit.toFixed(2));
-        const roundCents = Math.round(roundUnit * 100);
-
-        item.price = roundCents;
-        item.original_price = item.original_price || (origUnit * 100);
-        item.final_price = roundCents;
-        item.discounted_price = roundCents;
-        item.final_line_price = roundCents * qty;
-        item.line_price = roundCents * qty;
-
-        totalLineDiscount += (origUnit - roundUnit) * qty * 100;
-      } else {
-        const baseCents = item.original_price || item.price;
-        item.price = baseCents;
-        item.final_price = baseCents;
-        item.discounted_price = baseCents;
-        item.final_line_price = item.original_line_price || (baseCents * qty);
-        item.line_price = item.final_line_price;
-      }
-    }
-
-    if (totalLineDiscount > 0) {
-      const origTotal = cart.original_total_price || cart.items.reduce((s, it) => s + (it.original_line_price || it.price * it.quantity), 0);
-      cart.total_price = Math.max(0, origTotal - Math.round(totalLineDiscount));
-      cart.total_discount = Math.round(totalLineDiscount);
-    }
-    return cart;
-  }
-
-  // 6. SYNC CART DISCOUNT & SHIPROCKET/FASTRR HOOKS
-  function hookShiprocketBuyCart() {
-    if (typeof window.shiprocketCheckoutBuyCartHandler === "function" && !window.shiprocketCheckoutBuyCartHandler._btHooked) {
-      const origHandler = window.shiprocketCheckoutBuyCartHandler;
-      window.shiprocketCheckoutBuyCartHandler = async function(...args) {
-        try {
-          await syncCartDiscount();
-        } catch {}
-        return origHandler.apply(this, args);
-      };
-      window.shiprocketCheckoutBuyCartHandler._btHooked = true;
-    }
-
-    if (window.shiprocketCheckoutEvents && !window.shiprocketCheckoutEvents._btHooked) {
-      window.shiprocketCheckoutEvents._btHooked = true;
-      const origBuyCart = window.shiprocketCheckoutEvents.buyCart;
-      if (typeof origBuyCart === "function") {
-        window.shiprocketCheckoutEvents.buyCart = async function(e, t) {
-          try {
-            await syncCartDiscount();
-          } catch {}
-          return origBuyCart.call(this, e, t);
-        };
-      }
-    }
-
-    if (typeof window.handleShiprocketSmartCartBuy === "function" && !window.handleShiprocketSmartCartBuy._btHooked) {
-      window.handleShiprocketSmartCartBuy._btHooked = true;
-      const origSrBuy = window.handleShiprocketSmartCartBuy;
-      window.handleShiprocketSmartCartBuy = async function(...args) {
-        try {
-          await syncCartDiscount();
-        } catch {}
-        return origSrBuy.apply(this, args);
-      };
-    }
-
-    if (window.HeadlessCheckout && !window.HeadlessCheckout._btHooked) {
-      window.HeadlessCheckout._btHooked = true;
-      const origCheckout = window.HeadlessCheckout.checkout;
-      if (typeof origCheckout === "function") {
-        window.HeadlessCheckout.checkout = async function(e) {
-          try { await syncCartDiscount(); } catch {}
-          return origCheckout.call(this, e);
-        };
-      }
-    }
-  }
-
-  function hookFastrr() {
-    if (window.Fastrr && !window.Fastrr._btHooked) {
-      window.Fastrr._btHooked = true;
-      ["openCheckout", "buyCart", "checkout"].forEach((fn) => {
-        if (typeof window.Fastrr[fn] === "function") {
-          const orig = window.Fastrr[fn];
-          window.Fastrr[fn] = async function(...args) {
-            try { await syncCartDiscount(); } catch {}
-            return orig.apply(this, args);
-          };
-        }
-      });
-    }
-  }
-
-  let isFastrrSyncing = false;
-  async function syncFastrrProperties(cart, rules) {
-    if (isFastrrSyncing || !cart?.items?.length) return false;
-    isFastrrSyncing = true;
-    try {
-      const vRules = (rules || []).filter((r) => r.active && r.ruleType === "VOLUME" && r.tiers?.length);
-      const fRules = (rules || []).filter((r) => r.active && r.ruleType === "FBT" && r.fbtProducts?.length);
-
-      const changes = [];
-
-      for (const item of cart.items) {
-        const pId = String(item.product_id);
-        const vId = item.variant_id;
-        const qty = item.quantity;
-        const origUnit = (item.original_price || item.price) / 100;
-        let bestDiscUnit = origUnit;
-
-        // 1. Shopify native discount already present in cart
-        if (item.final_price && item.final_price < (item.original_price || item.price)) {
-          bestDiscUnit = item.final_price / 100;
-        }
-
-        // 2. Volume Discount Rules
-        for (const vr of vRules) {
-          const tId = String(vr.targetGid || "").replace(/\D/g, "");
-          const isMatch = vr.targetType === "PRODUCT"
-            ? pId === tId
-            : (vr.collectionProductIds || []).map(String).includes(pId);
-
-          if (isMatch) {
-            const matchingItems = cart.items.filter((it) =>
-              vr.targetType === "PRODUCT"
-                ? String(it.product_id) === tId
-                : (vr.collectionProductIds || []).map(String).includes(String(it.product_id))
-            );
-            const totalQty = matchingItems.reduce((s, it) => s + it.quantity, 0);
-            const tier = [...vr.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => totalQty >= x.minQuantity);
-            if (tier) {
-              const isFixed = tier.discountType === "FIXED_AMOUNT";
-              const val = Number(isFixed ? tier.discountValue : (tier.discountPercent || tier.discountValue || 0));
-              if (val > 0) {
-                const discUnit = isFixed
-                  ? Math.max(0, origUnit - (val / totalQty))
-                  : Math.max(0, origUnit * (1 - val / 100));
-                if (discUnit < bestDiscUnit) {
-                  bestDiscUnit = discUnit;
-                }
-              }
-            }
-          }
-        }
-
-        // 3. FBT Discount Rules
-        for (const fr of fRules) {
-          const tId = String(fr.targetGid || "").replace(/\D/g, "");
-          const cIds = fr.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
-          const targetItem = cart.items.find((it) => String(it.product_id) === tId);
-          const hasAll = targetItem && cIds.every((id) => cart.items.some((it) => String(it.product_id) === id));
-
-          if (hasAll && (pId === tId || cIds.includes(pId))) {
-            const isFixed = fr.discountType === "FIXED_AMOUNT";
-            const val = Number(isFixed ? fr.discountValue : (fr.mainDiscountPercent || fr.discountValue || 10));
-            if (val > 0) {
-              let fbtUnit = origUnit;
-              if (isFixed) {
-                const totalBundleItems = 1 + cIds.length;
-                fbtUnit = Math.max(0, origUnit - (val / totalBundleItems));
-              } else {
-                let pct = val;
-                if (pId === tId) {
-                  pct = Number(fr.mainDiscountPercent || val);
-                } else {
-                  const cp = fr.fbtProducts.find((p) => String(p.productId || "").replace(/\D/g, "") === pId);
-                  pct = Number(cp?.discountPercent || val);
-                }
-                fbtUnit = Math.max(0, origUnit * (1 - pct / 100));
-              }
-              if (fbtUnit < bestDiscUnit) {
-                bestDiscUnit = fbtUnit;
-              }
-            }
-          }
-        }
-
-        const currentProps = item.properties || {};
-        const hasYt = currentProps._isYtBundle === "true";
-        let currentPrice = null;
-        let currentQty = null;
-        try {
-          const parsed = JSON.parse(currentProps._bundleItems || "[]");
-          if (parsed.length) {
-            currentPrice = Number(parsed[0].price);
-            currentQty = Number(parsed[0].quantity);
-          }
-        } catch {}
-
-        if (bestDiscUnit < origUnit) {
-          const targetPrice = Number(bestDiscUnit.toFixed(2));
-          // If properties are missing, price changed, or quantity changed
-          if (!hasYt || currentPrice !== targetPrice || currentQty !== qty) {
-            changes.push({
-              id: item.key,
-              quantity: qty,
-              properties: {
-                ...currentProps,
-                _isYtBundle: "true",
-                _bundleItems: JSON.stringify([{ variantId: vId, quantity: qty, price: targetPrice }])
-              }
-            });
-          }
-        } else if (hasYt) {
-          // No discount applies anymore, strip _isYtBundle & _bundleItems
-          const cleanProps = { ...currentProps };
-          delete cleanProps._isYtBundle;
-          delete cleanProps._bundleItems;
-          changes.push({
-            id: item.key,
-            quantity: qty,
-            properties: cleanProps
-          });
-        }
-      }
-
-      if (changes.length > 0) {
-        for (const ch of changes) {
-          await fetch(ROOT + "cart/change.js?_bt=prop_sync", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(ch)
-          });
-        }
-        triggerRefresh();
-        return true;
-      }
-    } catch {} finally {
-      isFastrrSyncing = false;
-    }
-    return false;
-  }
-
+  // 6. SYNC CART DISCOUNT DISPLAY (NON-INVASIVE / ACCURATE SUMMARY)
   let syncLock = false;
   async function syncCartDiscount() {
     if (syncLock) return;
     syncLock = true;
     try {
-      hookShiprocketBuyCart();
-      hookFastrr();
-
       const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
       if (!res.ok) return;
-      let cart = await res.json();
+      const cart = await res.json();
 
       if (!cart?.items?.length) {
         clearDrawerEstimatedTotal();
@@ -997,12 +511,6 @@
       }
 
       const rules = await getRules();
-      const propsChanged = await syncFastrrProperties(cart, rules);
-      if (propsChanged) {
-        const uRes = await fetch(ROOT + "cart.js?_bt=" + Date.now());
-        if (uRes.ok) cart = await uRes.json();
-      }
-
       let origTotal = cart.original_total_price || cart.total_price;
       let finalTotal = cart.total_price;
       let lineFinal = 0, lineOrig = 0;
@@ -1017,9 +525,8 @@
       if (lineOrig > origTotal) origTotal = lineOrig;
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
-      // Check if rules calculate additional/active savings
-      const { disc, code } = getActiveDiscount(cart, rules);
-
+      // Check if rules calculate additional expected savings
+      const { disc } = getActiveDiscount(cart, rules);
       if (disc > 0) {
         const ruleFinal = Math.max(0, origTotal - disc);
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
@@ -1039,7 +546,6 @@
 
       // Check for Manual Coupons applied in Shiprocket drawer UI (e.g. "₹40.00 saved with LOYAL")
       getRoots().forEach((root) => {
-        // 1. Text search for "saved with" (e.g. "% ₹40.00 saved with LOYAL   Remove")
         const allTextNodes = Array.from(root.querySelectorAll("*")).filter(
           (el) => el.children.length === 0 && (el.textContent || "").includes("saved with")
         );
@@ -1054,7 +560,6 @@
           }
         });
 
-        // 2. Element by ID in Shiprocket Smart Cart
         const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
         const coupNameEl = root.querySelector("#sr-cart-applied-coupon-name, #sr-cart-applied-coupon-title");
         const coupName = (coupNameEl?.textContent || "").trim().toUpperCase();
@@ -1068,17 +573,9 @@
         }
       });
 
-      // CLUBBING: Deduct manual coupon from the already discounted item total!
+      // Deduct manual coupon from total for accurate drawer visual display
       if (manualCouponAmount > 0) {
         finalTotal = Math.max(0, finalTotal - manualCouponAmount);
-      }
-
-      // Apply rule discount code to Shopify Cart via Storefront API (Selleasy method)
-      // Preserves existing customer discount codes (e.g. LOYAL) and avoids clobbering!
-      if (code && disc > 0) {
-        await mutateCartDiscountCodes(cart, [code]);
-      } else {
-        await mutateCartDiscountCodes(cart, []);
       }
 
       if (finalTotal < origTotal) {
@@ -1091,7 +588,7 @@
     }
   }
 
-  // 7. PDP HYDRATION & DYNAMIC INJECTION
+  // 7. PDP HYDRATION & DYNAMIC INJECTION (RENDER ONLY CONFIGURED TIERS)
   let pdpInjected = false;
   async function hydratePdp() {
     if (!window.location.pathname.includes("/products/")) return;
@@ -1121,7 +618,7 @@
 
       const styleVars = `--bt-accent:${st.accentColor||"#008060"};--bt-bg:${st.bgColor||"#ffffff"};--bt-text:${st.textColor||"#1a1a1a"};--bt-border:${st.borderColor||"#e1e3e5"};--bt-badge-bg:${st.badgeBg||"#008060"};--bt-badge-text:${st.badgeText||"#ffffff"};--bt-font-size:${st.fontSize||"15px"};--bt-radius:${st.borderRadius||"8px"};`;
 
-      // Auto-inject Volume widget if missing
+      // Auto-inject Volume widget ONLY if an active rule with tiers exists in DB
       if (!hasVol) {
         const vRule = rules.find((r) =>
           r.active &&
@@ -1132,13 +629,16 @@
             : (r.collectionProductIds || []).map(String).includes(pIdStr))
         );
 
-        if (vRule) {
+        if (vRule && Array.isArray(vRule.tiers) && vRule.tiers.length > 0) {
           const basePrice = prod.price || prod.variants?.[0]?.price || 0;
           const clean = cleanCode(vRule.title);
           let cardsHtml = "";
 
-          vRule.tiers.forEach((t, i) => {
-            const minQ = t.minQuantity || 1;
+          // Render strictly the tiers defined by the merchant (sorted by minQuantity)
+          const sortedTiers = [...vRule.tiers].sort((a, b) => Number(a.minQuantity || 1) - Number(b.minQuantity || 1));
+
+          sortedTiers.forEach((t, i) => {
+            const minQ = Number(t.minQuantity || 1);
             const isF = t.discountType === "FIXED_AMOUNT";
             const val = Number(isF ? t.discountValue : (t.discountPercent || t.discountValue || 0));
             const origTot = basePrice * minQ;
@@ -1153,7 +653,7 @@
                 data-discount-value="${val}"
                 data-discount="${isF ? 0 : val}"
                 data-code="${code}">
-                ${i === 1 && vRule.tiers.length > 2 ? '<span class="bt-tier-badge">Most Popular</span>' : ""}
+                ${i === 1 && sortedTiers.length > 2 ? '<span class="bt-tier-badge">Most Popular</span>' : ""}
                 <div class="bt-tier-radio-wrap">
                   <input type="radio" name="bt-dyn-vol" class="bt-tier-radio" ${i === 0 ? "checked" : ""}>
                   <div class="bt-tier-info">
@@ -1176,7 +676,7 @@
           volDiv.innerHTML = `
             <div class="bt-widget-header">
               <h3 class="bt-widget-title">
-                <svg width="20" height="20" viewBox="24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
                   <line x1="7" y1="7" x2="7.01" y2="7"/>
                 </svg>
@@ -1194,7 +694,7 @@
         }
       }
 
-      // Auto-inject FBT widget if missing
+      // Auto-inject FBT widget ONLY if an active FBT rule exists in DB
       if (!hasFbt) {
         const fRule = rules.find((r) =>
           r.active &&
@@ -1291,7 +791,7 @@
           fbtDiv.innerHTML = `
             <div class="bt-widget-header">
               <h3 class="bt-widget-title">
-                <svg width="20" height="20" viewBox="24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
                   <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
                 </svg>
@@ -1317,33 +817,16 @@
     } catch {}
   }
 
-  // 8. INTERCEPT CART CALLS & CHECKOUT HOOKS (SYNCHRONOUS IN-MEMORY INTERCEPTION)
+  // 8. PASS-THROUGH CART CALLS (ZERO TAMPERING / INSTANT PASSIVE REFRESH)
   const _fetch = window.fetch;
-  window.fetch = async function(...args) {
-    const url = typeof args[0] === "string" ? args[0] : (args[0]?.url || "");
-    const isCartReq = /\/cart(\.js|\.json)?(\?|$)/i.test(url) || /\/cart\/(add|change|update)(\.js|\.json)?(\?|$)/i.test(url);
-    const isInternal = url.includes("_bt=");
-
-    const res = await _fetch.apply(this, args);
-
-    if (isCartReq && !isInternal && res.ok) {
-      try {
-        const clone = res.clone();
-        const json = await clone.json();
-        if (json && Array.isArray(json.items)) {
-          transformCartResponse(json);
-          setTimeout(syncCartDiscount, 100);
-          return new Response(JSON.stringify(json), {
-            status: res.status,
-            statusText: res.statusText,
-            headers: res.headers
-          });
-        }
-      } catch {}
-      setTimeout(syncCartDiscount, 200);
-    } else if (isCartReq && !isInternal) {
-      setTimeout(syncCartDiscount, 250);
-    }
+  window.fetch = function(...args) {
+    const res = _fetch.apply(this, args);
+    try {
+      const url = typeof args[0] === "string" ? args[0] : (args[0]?.url || "");
+      if (/\/cart(\.js|\/(add|change|update|clear))/i.test(url) && !url.includes("_bt=")) {
+        res.then(() => setTimeout(syncCartDiscount, 250)).catch(() => {});
+      }
+    } catch {}
     return res;
   };
 
@@ -1354,27 +837,10 @@
     return _xhrOpen.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
-    if (this._btUrl && !this._btUrl.includes("_bt=") &&
-        (/\/(cart\.js|cart\.json)(\?|$)/i.test(this._btUrl) || /\/cart\/(add|change|update)(\.js|\.json)?(\?|$)/i.test(this._btUrl))) {
-      const self = this;
-      let overridden = false;
-      const interceptXhr = () => {
-        try {
-          if (self.readyState === 4 && self.status === 200 && !overridden) {
-            overridden = true;
-            const data = JSON.parse(self.responseText);
-            if (data && Array.isArray(data.items)) {
-              transformCartResponse(data);
-              const transformedStr = JSON.stringify(data);
-              Object.defineProperty(self, "responseText", { get: () => transformedStr, configurable: true });
-              Object.defineProperty(self, "response", { get: () => transformedStr, configurable: true });
-              setTimeout(syncCartDiscount, 100);
-            }
-          }
-        } catch {}
-      };
-      this.addEventListener("readystatechange", interceptXhr, true);
-      this.addEventListener("load", interceptXhr, true);
+    if (this._btUrl && /\/cart(\.js|\/(add|change|update|clear))/i.test(this._btUrl) && !this._btUrl.includes("_bt=")) {
+      this.addEventListener("load", () => {
+        setTimeout(syncCartDiscount, 250);
+      });
     }
     return _xhrSend.apply(this, args);
   };
@@ -1405,12 +871,9 @@
 
   function start() {
     getConfig(); // preload & cache rules
-    hookShiprocketBuyCart();
-    hookFastrr();
     hydratePdp();
     setTimeout(syncCartDiscount, 300);
     attachObservers();
-    setInterval(hookShiprocketBuyCart, 1000);
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();

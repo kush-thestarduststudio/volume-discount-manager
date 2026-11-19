@@ -1,38 +1,6 @@
 import { type LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 
-const FALLBACK_RULES_TO_SYNC = [
-  {
-    id: "cmw-stardust-volume-test",
-    shop: "stardustt-studio.myshopify.com",
-    title: "Volume Tier: test",
-    targetType: "PRODUCT",
-    targetGid: "gid://shopify/Product/7488883753012",
-    tiers: JSON.stringify([
-      { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%" },
-      { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%" },
-      { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%" },
-      { minQuantity: 6, discountPercent: 25, discountType: "PERCENTAGE", discountValue: 25, label: "Buy 6 - Save 25%" },
-      { minQuantity: 8, discountPercent: 30, discountType: "PERCENTAGE", discountValue: 30, label: "Buy 8 - Save 30%" },
-    ]),
-    fbtProducts: JSON.stringify({
-      companions: [
-        {
-          productId: "8245592817876",
-          variantId: "44722881888468",
-          title: "7 Chakra and Hematite Ring Bracelet",
-          priceCents: 99800,
-          discountPercent: 15,
-        }
-      ],
-      discountType: "PERCENTAGE",
-      discountValue: 15,
-      mainDiscountPercent: 15
-    }),
-    active: true,
-  }
-];
-
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const shopParam = url.searchParams.get("shop") || "";
@@ -88,11 +56,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     };
 
     // 1. Fetch active rules from DB
-    const dbRules = await prisma.bundleRule.findMany({
+    const activeRules = await prisma.bundleRule.findMany({
       where: { active: true },
       orderBy: { createdAt: "desc" },
     });
-    const activeRules = dbRules.length > 0 ? dbRules : (FALLBACK_RULES_TO_SYNC as any[]);
 
     const activeRulesPayload = activeRules.map((r) => {
       let tiers = [];
