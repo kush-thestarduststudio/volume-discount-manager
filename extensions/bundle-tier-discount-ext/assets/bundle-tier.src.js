@@ -18,27 +18,18 @@
   function clearAppCouponCookies() {
     try {
       ["fastrrCouponCode", "discount_code"].forEach((name) => {
-        const m = document.cookie.match(new RegExp("(?:^|;\\s*)" + name + "=([^;]*)"));
-        if (m) {
-          const val = decodeURIComponent(m[1] || "").toUpperCase();
-          if (val.startsWith("TEST-BUY") || val.startsWith("BUNDLE-") || val.includes("-BUY") || val.includes("OFF")) {
-            document.cookie = `${name}=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-            document.cookie = `${name}=; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-            try {
-              const hostParts = window.location.hostname.split(".");
-              if (hostParts.length > 1) {
-                const rootDomain = hostParts.slice(-2).join(".");
-                document.cookie = `${name}=; domain=.${rootDomain}; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-                document.cookie = `${name}=; domain=.${rootDomain}; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-              }
-            } catch {}
+        document.cookie = `${name}=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+        document.cookie = `${name}=; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+        try {
+          const hostParts = window.location.hostname.split(".");
+          if (hostParts.length > 1) {
+            const rootDomain = hostParts.slice(-2).join(".");
+            document.cookie = `${name}=; domain=.${rootDomain}; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            document.cookie = `${name}=; domain=.${rootDomain}; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
           }
-        }
+        } catch {}
       });
-      const ls = (localStorage.getItem("fastrrCouponCode") || "").toUpperCase();
-      if (ls.startsWith("TEST-BUY") || ls.startsWith("BUNDLE-") || ls.includes("-BUY") || ls.includes("OFF")) {
-        localStorage.removeItem("fastrrCouponCode");
-      }
+      localStorage.removeItem("fastrrCouponCode");
     } catch {}
   }
 
@@ -114,7 +105,6 @@
   // 1. ESTIMATED TOTAL STRIKETHROUGH & FINAL PRICE IN SHIPROCKET SHADOW DOM
   let activeFinalCents = 0;
   let activeOrigCents = 0;
-  let totalTimer = null;
   const observedRoots = new Set();
 
   function updateEstimatedTotal(finalCents, origCents) {
@@ -124,6 +114,22 @@
 
     const roots = getRoots();
     roots.forEach((root) => {
+      // If Shiprocket Smart Cart is present and renders its own native Bill Summary with discounts or coupons,
+      // allow Shiprocket to manage its live total reactively so coupon apply/remove works seamlessly!
+      const hasAppliedDiscounts = Array.from(root.querySelectorAll?.("*") || []).some(
+        (el) => el.children.length === 0 && /(saved with|coupon discount|auto discount)/i.test(el.textContent || "")
+      );
+      if (hasAppliedDiscounts) {
+        // Only ensure original price strikethrough is visible if present
+        const origEls = Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']"));
+        origEls.forEach((el) => {
+          if (el.textContent !== origStr) el.textContent = origStr;
+          if (el.style.display !== "inline-block") el.style.display = "inline-block";
+          if (el.style.textDecoration !== "line-through") el.style.textDecoration = "line-through";
+        });
+        return;
+      }
+
       const totalEls = Array.from(root.querySelectorAll(".total-price, [class*='total-price']"));
       const origEls = Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']"));
       const subTotalEls = Array.from(root.querySelectorAll(".sr-sub-total"));
@@ -179,7 +185,7 @@
       if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
         updateEstimatedTotal(activeFinalCents, activeOrigCents);
       }
-    }, 60);
+    }, 100);
   });
 
   function attachObservers() {
@@ -194,14 +200,16 @@
             const target = e.target;
             const isAction = target?.closest?.("[class*='qty'], [class*='quantity'], [class*='delete'], [class*='remove'], [class*='coupon'], button, a");
             if (isAction) {
-              setTimeout(syncCartDiscount, 150);
-              setTimeout(syncCartDiscount, 600);
+              setTimeout(syncCartDiscount, 100);
+              setTimeout(syncCartDiscount, 400);
+              setTimeout(syncCartDiscount, 900);
             }
           }, true);
           r.addEventListener("change", (e) => {
             if (e.target?.matches?.("input[type='number'], input[name='quantity'], [class*='qty']")) {
-              setTimeout(syncCartDiscount, 150);
-              setTimeout(syncCartDiscount, 600);
+              setTimeout(syncCartDiscount, 100);
+              setTimeout(syncCartDiscount, 400);
+              setTimeout(syncCartDiscount, 900);
             }
           }, true);
         } catch {}
@@ -216,50 +224,15 @@
 
     attachObservers();
     updateEstimatedTotal(finalCents, origCents);
-
-    if (totalTimer) clearInterval(totalTimer);
-    totalTimer = setInterval(() => {
-      attachObservers();
-      if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
-        updateEstimatedTotal(activeFinalCents, activeOrigCents);
-      }
-    }, 250);
   }
 
   function clearDrawerEstimatedTotal(cart) {
     activeFinalCents = 0;
     activeOrigCents = 0;
-    if (totalTimer) {
-      clearInterval(totalTimer);
-      totalTimer = null;
-    }
-    const currentTotalStr = cart?.total_price ? fmtPrice(cart.total_price) : "";
     getRoots().forEach((root) => {
       Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']")).forEach((el) => {
         el.style.display = "none";
       });
-
-      if (currentTotalStr) {
-        Array.from(root.querySelectorAll(".total-price, [class*='total-price'], .sr-sub-total")).forEach((el) => {
-          if (el.textContent !== currentTotalStr) {
-            el.textContent = currentTotalStr;
-          }
-        });
-
-        Array.from(root.querySelectorAll("*")).forEach((lbl) => {
-          if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
-            const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
-            if (container) {
-              const priceEls = Array.from(container.querySelectorAll("*")).filter(
-                (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
-              );
-              priceEls.forEach((p) => {
-                p.textContent = currentTotalStr;
-              });
-            }
-          }
-        });
-      }
     });
   }
 
@@ -821,12 +794,15 @@
 
       if (Array.isArray(cart.cart_level_discount_applications) && cart.cart_level_discount_applications.length > 0) {
         cart.cart_level_discount_applications.forEach((app) => {
-          const title = (app.title || "").trim();
-          const upper = title.toUpperCase();
-          if (upper && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
-            customerCoupons.push(title);
-            const amt = Number(app.total_allocated_amount || 0);
-            if (amt > 0) manualCouponAmount += amt;
+          // NEVER treat automatic discounts (like TEST BUNDLE-10 or WEALTH or LORDSHIVA) as manual customer coupons!
+          if (app.type === "discount_code") {
+            const title = (app.title || "").trim();
+            const upper = title.toUpperCase();
+            if (upper && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
+              if (!customerCoupons.includes(title)) customerCoupons.push(title);
+              const amt = Number(app.total_allocated_amount || 0);
+              if (amt > 0) manualCouponAmount += amt;
+            }
           }
         });
       }
@@ -835,31 +811,42 @@
         cart.discount_codes.forEach((dc) => {
           const c = (dc.code || "").trim();
           const upper = c.toUpperCase();
-          if (c && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
-            customerCoupons.push(c);
+          if (c && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
+            if (!customerCoupons.includes(c)) customerCoupons.push(c);
+            const amt = Number(dc.amount || 0);
+            if (amt > 0) manualCouponAmount = Math.max(manualCouponAmount, amt);
           }
         });
       }
 
       getRoots().forEach((root) => {
-        const allTextNodes = Array.from(root.querySelectorAll("*")).filter(
-          (el) => el.children.length === 0 && (el.textContent || "").includes("saved with")
-        );
-        allTextNodes.forEach((el) => {
-          const txt = (el.textContent || "").trim();
-          const m = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved with\s*([A-Za-z0-9_-]+)?/i);
-          if (m) {
-            if (m[1]) {
-              const val = Math.round(parseFloat(m[1].replace(/,/g, "")) * 100);
-              if (val > 0 && manualCouponAmount === 0) {
-                manualCouponAmount = val;
+        // Parse Shiprocket Bill Summary line: "Coupon discount (LOYAL) - ₹59.90"
+        Array.from(root.querySelectorAll("*")).forEach((el) => {
+          if (el.children.length === 0) {
+            const txt = (el.textContent || "").trim();
+            const billMatch = txt.match(/coupon\s*discount\s*\(([A-Za-z0-9_-]+)\)\s*[-:]?\s*₹?\s*([\d,]+(\.\d+)?)/i);
+            if (billMatch) {
+              const cName = billMatch[1].trim();
+              const upper = cName.toUpperCase();
+              if (cName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
+                if (!customerCoupons.includes(cName)) customerCoupons.push(cName);
+                if (billMatch[2]) {
+                  const val = Math.round(parseFloat(billMatch[2].replace(/,/g, "")) * 100);
+                  if (val > 0) manualCouponAmount = Math.max(manualCouponAmount, val);
+                }
               }
             }
-            if (m[3]) {
-              const c = m[3].trim();
-              const upper = c.toUpperCase();
-              if (c && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
-                customerCoupons.push(c);
+
+            const savedMatch = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved\s+with\s+([A-Za-z0-9_-]+)/i);
+            if (savedMatch) {
+              const cName = savedMatch[3]?.trim();
+              const upper = (cName || "").toUpperCase();
+              if (cName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
+                if (!customerCoupons.includes(cName)) customerCoupons.push(cName);
+                if (savedMatch[1]) {
+                  const val = Math.round(parseFloat(savedMatch[1].replace(/,/g, "")) * 100);
+                  if (val > 0) manualCouponAmount = Math.max(manualCouponAmount, val);
+                }
               }
             }
           }
@@ -870,13 +857,13 @@
         const coupName = (coupNameEl?.textContent || "").trim();
         const upper = coupName.toUpperCase();
 
-        if (coupName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-")) {
-          customerCoupons.push(coupName);
+        if (coupName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
+          if (!customerCoupons.includes(coupName)) customerCoupons.push(coupName);
           if (coupAmtEl) {
             const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
             const cVal = Math.round(parseFloat(txt) * 100);
-            if (cVal > 0 && manualCouponAmount === 0) {
-              manualCouponAmount = cVal;
+            if (cVal > 0) {
+              manualCouponAmount = Math.max(manualCouponAmount, cVal);
             }
           }
         }

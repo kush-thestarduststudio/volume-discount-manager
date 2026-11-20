@@ -63,15 +63,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     // Auto-migrate legacy invalid companion product ID (8245592817876 / 7366296928308 -> 15454599512116)
     for (const r of activeRules) {
+      let changed = false;
+      let fixedTargetGid = r.targetGid;
+      if (r.targetGid && (r.targetGid.includes("8245592817876") || r.targetGid.includes("7366296928308"))) {
+        fixedTargetGid = "gid://shopify/Product/15454599512116";
+        r.targetGid = fixedTargetGid;
+        changed = true;
+      }
+      let fixedFbt = r.fbtProducts;
       if (r.fbtProducts && (r.fbtProducts.includes("8245592817876") || r.fbtProducts.includes("7366296928308"))) {
-        const fixedFbt = r.fbtProducts
+        fixedFbt = r.fbtProducts
           .replace(/8245592817876|7366296928308/g, "15454599512116")
           .replace(/44722881888468|43182450442292/g, "67910792216628")
           .replace(/7 Chakra and Hematite Ring Bracelet|Amethyst Bracelet/g, "Mahalakshmi (Dhan) Flora Masala Agarbatti");
         r.fbtProducts = fixedFbt;
+        changed = true;
+      }
+      if (changed) {
         prisma.bundleRule.update({
           where: { id: r.id },
-          data: { fbtProducts: fixedFbt },
+          data: { targetGid: fixedTargetGid, fbtProducts: fixedFbt },
         }).catch(() => {});
       }
     }
@@ -326,7 +337,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             return id?.startsWith("gid://") ? id : "gid://shopify/Product/" + id;
           })
           .filter(Boolean);
-        const allBundleGids = [rule.targetGid, ...companionGids];
+        let safeTargetGid = rule.targetGid;
+        if (String(safeTargetGid).includes("8245592817876") || String(safeTargetGid).includes("7366296928308")) {
+          safeTargetGid = "gid://shopify/Product/15454599512116";
+        }
+        const allBundleGids = [safeTargetGid, ...companionGids];
         const isFixed = rule.discountType === "FIXED_AMOUNT";
         const val = Number(isFixed ? rule.discountValue : (rule.mainDiscountPercent || rule.discountValue || rule.fbtProducts[0]?.discountPercent || 10));
         const valDisplay = isFixed ? `₹${val}` : `${val}%`;
@@ -341,7 +356,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           code: `BUNDLE-${cleanName}-${val}OFF`,
           minQuantity: allBundleGids.length,
           targetType: "PRODUCT",
-          targetGid: rule.targetGid,
+          targetGid: safeTargetGid,
           targetGids: allBundleGids,
         });
       }
