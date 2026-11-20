@@ -39,17 +39,36 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { createdAt: "desc" },
     });
 
-    // Auto-migrate legacy invalid companion product ID (8245592817876 -> 7366296928308)
+    // Auto-migrate legacy companion product ID (8245592817876 / 7366296928308 -> 15454599512116 Mahalakshmi Agarbatti)
     for (const r of rules) {
-      if (r.fbtProducts && r.fbtProducts.includes("8245592817876")) {
-        const fixedFbt = r.fbtProducts
-          .replace(/8245592817876/g, "7366296928308")
-          .replace(/44722881888468/g, "43182450442292")
-          .replace(/7 Chakra and Hematite Ring Bracelet/g, "Amethyst Bracelet");
+      if (r.fbtProducts && (r.fbtProducts.includes("8245592817876") || r.fbtProducts.includes("7366296928308") || r.fbtProducts.includes("Amethyst"))) {
+        const fixedFbt = JSON.stringify({
+          discountType: "PERCENTAGE",
+          discountValue: 10,
+          mainDiscountPercent: 10,
+          triggerProduct: {
+            id: "7488883753012",
+            variantId: "46920435957812",
+            title: "test",
+            priceCents: 40000,
+            image: ""
+          },
+          companions: [
+            {
+              productId: "15454599512116",
+              variantId: "67910792216628",
+              title: "Mahalakshmi (Dhan) Flora Masala Agarbatti",
+              priceCents: 19900,
+              image: "https://cdn.shopify.com/s/files/1/0634/3272/0436/files/mahalaksmi_agarbatti_price.webp?v=1794561818",
+              discountPercent: 10,
+            }
+          ]
+        });
         r.fbtProducts = fixedFbt;
+        r.title = "Bundle for: test";
         prisma.bundleRule.update({
           where: { id: r.id },
-          data: { fbtProducts: fixedFbt },
+          data: { fbtProducts: fixedFbt, title: "Bundle for: test" },
         }).catch(() => {});
       }
     }
@@ -88,9 +107,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             targetGid: "gid://shopify/Product/7488883753012",
             tiers: "[]",
             fbtProducts: JSON.stringify({
-              mainDiscountPercent: 15,
+              mainDiscountPercent: 10,
               discountType: "PERCENTAGE",
-              discountValue: 15,
+              discountValue: 10,
               triggerProduct: {
                 id: "7488883753012",
                 variantId: "46920435957812",
@@ -100,11 +119,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               },
               companions: [
                 {
-                  productId: "7366296928308",
-                  variantId: "43182450442292",
-                  title: "Amethyst Bracelet",
-                  priceCents: 99800,
-                  discountPercent: 15,
+                  productId: "15454599512116",
+                  variantId: "67910792216628",
+                  title: "Mahalakshmi (Dhan) Flora Masala Agarbatti",
+                  priceCents: 19900,
+                  image: "https://cdn.shopify.com/s/files/1/0634/3272/0436/files/mahalaksmi_agarbatti_price.webp?v=1794561818",
+                  discountPercent: 10,
                 }
               ]
             }),

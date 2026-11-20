@@ -568,12 +568,28 @@
           candidates.push({ disc, code, type: "VOLUME" });
         }
       } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
-        const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
-        const targetItem = cart.items.find((it) => String(it.product_id) === tId);
-        const hasAllCompanions = cIds.every((id) => cart.items.some((it) => String(it.product_id) === id));
+        const targetItem = cart.items.find((it) =>
+          String(it.product_id) === tId ||
+          (r.triggerProduct?.variantId && String(it.variant_id) === String(r.triggerProduct.variantId).replace(/\D/g, ""))
+        );
+        const hasAllCompanions = r.fbtProducts.every((p) => {
+          const cpId = String(p.productId || "").replace(/\D/g, "");
+          const cpVId = String(p.variantId || "").replace(/\D/g, "");
+          return cart.items.some((it) =>
+            (cpId && String(it.product_id) === cpId) ||
+            (cpVId && String(it.variant_id) === cpVId)
+          );
+        });
 
         if (targetItem && hasAllCompanions) {
-          const companionItems = cIds.map((id) => cart.items.find((it) => String(it.product_id) === id));
+          const companionItems = r.fbtProducts.map((p) => {
+            const cpId = String(p.productId || "").replace(/\D/g, "");
+            const cpVId = String(p.variantId || "").replace(/\D/g, "");
+            return cart.items.find((it) =>
+              (cpId && String(it.product_id) === cpId) ||
+              (cpVId && String(it.variant_id) === cpVId)
+            );
+          });
           const bundleCount = Math.min(targetItem.quantity, ...companionItems.map((it) => it?.quantity || 1));
           const isFixed = r.discountType === "FIXED_AMOUNT";
           const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
@@ -629,9 +645,18 @@
       for (const r of rules) {
         if (!r.active || r.ruleType !== "FBT" || !r.fbtProducts?.length) continue;
         const tId = String(r.targetGid || "").replace(/\D/g, "");
-        const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
-        const targetItem = cart.items.find((it) => String(it.product_id) === tId);
-        const hasAllCompanions = cIds.every((id) => cart.items.some((it) => String(it.product_id) === id));
+        const targetItem = cart.items.find((it) =>
+          String(it.product_id) === tId ||
+          (r.triggerProduct?.variantId && String(it.variant_id) === String(r.triggerProduct.variantId).replace(/\D/g, ""))
+        );
+        const hasAllCompanions = r.fbtProducts.every((p) => {
+          const cpId = String(p.productId || "").replace(/\D/g, "");
+          const cpVId = String(p.variantId || "").replace(/\D/g, "");
+          return cart.items.some((it) =>
+            (cpId && String(it.product_id) === cpId) ||
+            (cpVId && String(it.variant_id) === cpVId)
+          );
+        });
 
         if (targetItem && hasAllCompanions) {
           const isFixed = r.discountType === "FIXED_AMOUNT";
@@ -643,10 +668,15 @@
             : Math.round(tUnitCents * (100 - bp) / 100) / 100;
           targetItemPrices.set(targetItem.key, tPriceRupees);
 
-          cIds.forEach((id, idx) => {
-            const compItem = cart.items.find((it) => String(it.product_id) === id);
+          r.fbtProducts.forEach((p, idx) => {
+            const cpId = String(p.productId || "").replace(/\D/g, "");
+            const cpVId = String(p.variantId || "").replace(/\D/g, "");
+            const compItem = cart.items.find((it) =>
+              (cpId && String(it.product_id) === cpId) ||
+              (cpVId && String(it.variant_id) === cpVId)
+            );
             if (compItem) {
-              const cp = Number(r.fbtProducts[idx]?.discountPercent || bp || 10);
+              const cp = Number(p.discountPercent || bp || 10);
               const cUnitCents = Math.round((compItem.original_line_price || compItem.price * compItem.quantity) / compItem.quantity);
               const cPriceRupees = isFixed
                 ? Math.round(cUnitCents / 100)
@@ -715,10 +745,11 @@
               }])
             };
             try {
+              const lineIdx = cart.items.indexOf(item) + 1;
               await fetch(ROOT + "cart/change.js?_bt=1", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
+                body: JSON.stringify({ line: lineIdx, id: item.key, quantity: item.quantity, properties: newProps })
               });
               needsCartRefetch = true;
             } catch {}
@@ -726,10 +757,11 @@
         } else if (isYt) {
           const newProps = { ...currentProps, _isYtBundle: "", _bundleItems: "" };
           try {
+            const lineIdx = cart.items.indexOf(item) + 1;
             await fetch(ROOT + "cart/change.js?_bt=1", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
+              body: JSON.stringify({ line: lineIdx, id: item.key, quantity: item.quantity, properties: newProps })
             });
             needsCartRefetch = true;
           } catch {}
@@ -739,6 +771,7 @@
       if (needsCartRefetch) {
         const refetchRes = await fetch(ROOT + "cart.js?_bt=" + Date.now());
         if (refetchRes.ok) cart = await refetchRes.json();
+        triggerRefresh();
       }
 
       let origTotal = cart.original_total_price || cart.total_price;
