@@ -399,121 +399,102 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
     }
 
-    // Delete outdated discounts
+    // Clean up existing app discounts for fresh recreation with latest products & tiers
     const deleteResults: any[] = [];
     for (const oldNode of existingAppDiscounts) {
       const title = oldNode.discount?.title || "";
       const isCode = oldNode.discount?.__typename === "DiscountCodeBasic";
-
-      const stillNeeded = expectedDiscounts.some((exp) =>
-        isCode ? exp.codeTitle === title : exp.autoTitle === title
-      );
-      if (!stillNeeded) {
-        if (isCode) {
-          const delRes = await graphql(
-            `mutation DeleteCodeDiscount($id: ID!) {
-              discountCodeDelete(id: $id) { userErrors { field message } }
-            }`,
-            { id: oldNode.id }
-          );
-          deleteResults.push({ id: oldNode.id, title, res: delRes });
-        } else {
-          const delRes = await graphql(
-            `mutation DeleteDiscount($id: ID!) {
-              discountAutomaticDelete(id: $id) { userErrors { field message } }
-            }`,
-            { id: oldNode.id }
-          );
-          deleteResults.push({ id: oldNode.id, title, res: delRes });
-        }
+      if (isCode) {
+        const delRes = await graphql(
+          `mutation DeleteCodeDiscount($id: ID!) {
+            discountCodeDelete(id: $id) { userErrors { field message } }
+          }`,
+          { id: oldNode.id }
+        );
+        deleteResults.push({ id: oldNode.id, title, res: delRes });
+      } else {
+        const delRes = await graphql(
+          `mutation DeleteDiscount($id: ID!) {
+            discountAutomaticDelete(id: $id) { userErrors { field message } }
+          }`,
+          { id: oldNode.id }
+        );
+        deleteResults.push({ id: oldNode.id, title, res: delRes });
       }
     }
 
-    // Create missing automatic discounts and code discounts
+    // Create expected automatic discounts and code discounts fresh
     const createResults: any[] = [];
     for (const exp of expectedDiscounts) {
       // 1. Automatic Discount
-      const autoExists = existingAppDiscounts.some(
-        (n: any) => n.discount?.title === exp.autoTitle && n.discount?.__typename === "DiscountAutomaticBasic"
-      );
-      if (!autoExists) {
-        const createRes = await graphql(
-          `mutation CreateNativeAutomaticDiscount($input: DiscountAutomaticBasicInput!) {
-            discountAutomaticBasicCreate(automaticBasicDiscount: $input) {
-              automaticDiscountNode { id }
-              userErrors { field message }
-            }
-          }`,
-          {
-            input: {
-              title: exp.autoTitle,
-              startsAt: new Date().toISOString(),
-              customerGets: {
-                value:
-                  exp.discountType === "FIXED_AMOUNT"
-                    ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
-                    : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
-                items: exp.targetType === "COLLECTION"
-                  ? { collections: { collectionsToAdd: [exp.targetGid] } }
-                  : { products: { productsToAdd: exp.targetGids } },
-              },
-              minimumRequirement: {
-                quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
-              },
-              combinesWith: {
-                orderDiscounts: true,
-                productDiscounts: true,
-                shippingDiscounts: true,
-              },
-            },
+      const createRes = await graphql(
+        `mutation CreateNativeAutomaticDiscount($input: DiscountAutomaticBasicInput!) {
+          discountAutomaticBasicCreate(automaticBasicDiscount: $input) {
+            automaticDiscountNode { id }
+            userErrors { field message }
           }
-        );
-        createResults.push({ title: exp.autoTitle, result: createRes });
-      }
+        }`,
+        {
+          input: {
+            title: exp.autoTitle,
+            startsAt: new Date().toISOString(),
+            customerGets: {
+              value:
+                exp.discountType === "FIXED_AMOUNT"
+                  ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
+                  : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
+              items: exp.targetType === "COLLECTION"
+                ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                : { products: { productsToAdd: exp.targetGids } },
+            },
+            minimumRequirement: {
+              quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
+            },
+            combinesWith: {
+              orderDiscounts: true,
+              productDiscounts: true,
+              shippingDiscounts: true,
+            },
+          },
+        }
+      );
+      createResults.push({ title: exp.autoTitle, result: createRes });
 
       // 2. Code Discount
-      const codeExists = existingAppDiscounts.some((n: any) => {
-        if (n.discount?.__typename !== "DiscountCodeBasic") return false;
-        if (n.discount?.title === exp.codeTitle) return true;
-        const codes = (n.discount?.codes?.nodes || []).map((c: any) => c.code);
-        return codes.includes(exp.code);
-      });
-      if (!codeExists) {
-        const createCodeRes = await graphql(
-          `mutation CreateNativeCodeDiscount($input: DiscountCodeBasicInput!) {
-            discountCodeBasicCreate(basicCodeDiscount: $input) {
-              codeDiscountNode { id }
-              userErrors { field message }
-            }
-          }`,
-          {
-            input: {
-              title: exp.codeTitle,
-              code: exp.code,
-              startsAt: new Date().toISOString(),
-              customerSelection: { all: true },
-              customerGets: {
-                value:
-                  exp.discountType === "FIXED_AMOUNT"
-                    ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
-                    : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
-                items: exp.targetType === "COLLECTION"
-                  ? { collections: { collectionsToAdd: [exp.targetGid] } }
-                  : { products: { productsToAdd: exp.targetGids } },
-              },
-              minimumRequirement: {
-                quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
-              },
-              combinesWith: {
-                orderDiscounts: true,
-                productDiscounts: true,
-                shippingDiscounts: true,
-              },
-            },
+      const createCodeRes = await graphql(
+        `mutation CreateNativeCodeDiscount($input: DiscountCodeBasicInput!) {
+          discountCodeBasicCreate(basicCodeDiscount: $input) {
+            codeDiscountNode { id }
+            userErrors { field message }
           }
-        );
-        createResults.push({ title: exp.codeTitle, code: exp.code, result: createCodeRes });
-      }
+        }`,
+        {
+          input: {
+            title: exp.codeTitle,
+            code: exp.code,
+            startsAt: new Date().toISOString(),
+            customerSelection: { all: true },
+            customerGets: {
+              value:
+                exp.discountType === "FIXED_AMOUNT"
+                  ? { discountAmount: { amount: Number(exp.discountValue).toFixed(2), appliesOnEachItem: false } }
+                  : { percentage: Number(exp.discountPercent || exp.discountValue) / 100 },
+              items: exp.targetType === "COLLECTION"
+                ? { collections: { collectionsToAdd: [exp.targetGid] } }
+                : { products: { productsToAdd: exp.targetGids } },
+            },
+            minimumRequirement: {
+              quantity: { greaterThanOrEqualToQuantity: String(exp.minQuantity) },
+            },
+            combinesWith: {
+              orderDiscounts: true,
+              productDiscounts: true,
+              shippingDiscounts: true,
+            },
+          },
+        }
+      );
+      createResults.push({ title: exp.codeTitle, code: exp.code, result: createCodeRes });
     }
 
     return new Response(

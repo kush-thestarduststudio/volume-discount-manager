@@ -307,10 +307,33 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
+          const basePriceCents = parseInt(wrap.dataset.basePrice || "0", 10) || 40000;
+          let unitPriceRupees = 0;
+          if (sel && sel.val > 0) {
+            const isFixed = sel.type === "FIXED_AMOUNT";
+            unitPriceRupees = isFixed
+              ? Math.max(0, Math.round(((basePriceCents * qty - sel.val * 100) / qty)) / 100)
+              : Math.round(basePriceCents * (100 - sel.val) / 100) / 100;
+          }
+
+          const itemPayload = {
+            id,
+            quantity: qty,
+            properties: unitPriceRupees > 0 ? {
+              _isYtBundle: "true",
+              _bundleItems: JSON.stringify([{
+                productId: Number(wrap.dataset.productId || 0),
+                variantId: id,
+                quantity: qty,
+                price: unitPriceRupees
+              }])
+            } : {}
+          };
+
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items: [{ id, quantity: qty }] }),
+            body: JSON.stringify({ items: [itemPayload] }),
           });
           if (!res.ok) throw new Error();
 
@@ -394,11 +417,47 @@
 
         const companionCbs = cbs.filter((cb) => cb.checked && cb.dataset.variantId);
         const baseId = parseInt(String(baseVId).replace(/\D/g, ""), 10);
-        const items = [{ id: baseId, quantity: 1 }];
+        
+        const baseDiscPriceRupees = isFixed
+          ? Math.max(0, Math.round(basePrice - discVal * 100) / 100)
+          : Math.round(basePrice * (100 - (baseDisc || discVal)) / 100) / 100;
+
+        const items = [{
+          id: baseId,
+          quantity: 1,
+          properties: {
+            _isYtBundle: "true",
+            _bundleItems: JSON.stringify([{
+              productId: Number(wrap.dataset.baseProductId || 0),
+              variantId: baseId,
+              quantity: 1,
+              price: baseDiscPriceRupees
+            }])
+          }
+        }];
 
         companionCbs.forEach((cb) => {
           const cId = parseInt(String(cb.dataset.variantId).replace(/\D/g, ""), 10);
-          items.push({ id: cId, quantity: 1 });
+          const cPId = parseInt(String(cb.dataset.productId || "").replace(/\D/g, ""), 10);
+          const cPrice = parseInt(cb.dataset.price || "0", 10);
+          const cDisc = parseInt(cb.dataset.discount || "0", 10) || discVal;
+          const compDiscPriceRupees = isFixed
+            ? Math.round(cPrice / 100)
+            : Math.round(cPrice * (100 - cDisc) / 100) / 100;
+
+          items.push({
+            id: cId,
+            quantity: 1,
+            properties: {
+              _isYtBundle: "true",
+              _bundleItems: JSON.stringify([{
+                productId: cPId,
+                variantId: cId,
+                quantity: 1,
+                price: compDiscPriceRupees
+              }])
+            }
+          });
         });
 
         btn.disabled = true;
@@ -553,7 +612,7 @@
     try {
       const res = await fetch(ROOT + "cart.js?_bt=" + Date.now());
       if (!res.ok) return;
-      const cart = await res.json();
+      let cart = await res.json();
 
       if (!cart?.items?.length) {
         clearDrawerEstimatedTotal(cart);
@@ -562,6 +621,126 @@
       }
 
       const rules = await getRules();
+
+      // Dynamic Fastrr / Shiprocket Bundle Property Reconciliation
+      const targetItemPrices = new Map();
+
+      // Check FBT rules
+      for (const r of rules) {
+        if (!r.active || r.ruleType !== "FBT" || !r.fbtProducts?.length) continue;
+        const tId = String(r.targetGid || "").replace(/\D/g, "");
+        const cIds = r.fbtProducts.map((p) => String(p.productId || "").replace(/\D/g, ""));
+        const targetItem = cart.items.find((it) => String(it.product_id) === tId);
+        const hasAllCompanions = cIds.every((id) => cart.items.some((it) => String(it.product_id) === id));
+
+        if (targetItem && hasAllCompanions) {
+          const isFixed = r.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
+          const bp = Number(r.mainDiscountPercent || val || 0);
+          const tUnitCents = Math.round((targetItem.original_line_price || targetItem.price * targetItem.quantity) / targetItem.quantity);
+          const tPriceRupees = isFixed
+            ? Math.max(0, Math.round(tUnitCents - val * 100) / 100)
+            : Math.round(tUnitCents * (100 - bp) / 100) / 100;
+          targetItemPrices.set(targetItem.key, tPriceRupees);
+
+          cIds.forEach((id, idx) => {
+            const compItem = cart.items.find((it) => String(it.product_id) === id);
+            if (compItem) {
+              const cp = Number(r.fbtProducts[idx]?.discountPercent || bp || 10);
+              const cUnitCents = Math.round((compItem.original_line_price || compItem.price * compItem.quantity) / compItem.quantity);
+              const cPriceRupees = isFixed
+                ? Math.round(cUnitCents / 100)
+                : Math.round(cUnitCents * (100 - cp) / 100) / 100;
+              targetItemPrices.set(compItem.key, cPriceRupees);
+            }
+          });
+        }
+      }
+
+      // Check Volume rules
+      for (const r of rules) {
+        if (!r.active || r.ruleType !== "VOLUME" || !r.tiers?.length) continue;
+        const tId = String(r.targetGid || "").replace(/\D/g, "");
+        const items = cart.items.filter((it) =>
+          r.targetType === "PRODUCT"
+            ? String(it.product_id) === tId
+            : (r.collectionProductIds || []).map(String).includes(String(it.product_id))
+        );
+        const qty = items.reduce((s, it) => s + it.quantity, 0);
+        const t = [...r.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => qty >= x.minQuantity);
+        if (t) {
+          const isFixed = t.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 0));
+          items.forEach((it) => {
+            if (!targetItemPrices.has(it.key)) {
+              const unitCents = Math.round((it.original_line_price || it.price * it.quantity) / it.quantity);
+              const targetRupees = isFixed
+                ? Math.max(0, Math.round(unitCents - (val * 100 / qty)) / 100)
+                : Math.round(unitCents * (100 - val) / 100) / 100;
+              targetItemPrices.set(it.key, targetRupees);
+            }
+          });
+        }
+      }
+
+      // Reconcile line item properties with targetItemPrices via /cart/change.js
+      let needsCartRefetch = false;
+      for (const item of cart.items) {
+        const targetPriceRupees = targetItemPrices.get(item.key) ?? null;
+        const currentProps = item.properties || {};
+        const isYt = currentProps._isYtBundle === "true";
+        let currentPrice = null;
+        let currentQty = null;
+        if (isYt && currentProps._bundleItems) {
+          try {
+            const parsed = JSON.parse(currentProps._bundleItems);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              currentPrice = Number(parsed[0].price);
+              currentQty = Number(parsed[0].quantity);
+            }
+          } catch {}
+        }
+
+        if (targetPriceRupees !== null) {
+          if (!isYt || currentPrice !== targetPriceRupees || currentQty !== item.quantity) {
+            const newProps = {
+              ...currentProps,
+              _isYtBundle: "true",
+              _bundleItems: JSON.stringify([{
+                productId: Number(item.product_id),
+                variantId: Number(item.variant_id),
+                title: item.title,
+                quantity: Number(item.quantity),
+                price: targetPriceRupees
+              }])
+            };
+            try {
+              await fetch(ROOT + "cart/change.js?_bt=1", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
+              });
+              needsCartRefetch = true;
+            } catch {}
+          }
+        } else if (isYt) {
+          const newProps = { ...currentProps, _isYtBundle: "", _bundleItems: "" };
+          try {
+            await fetch(ROOT + "cart/change.js?_bt=1", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
+            });
+            needsCartRefetch = true;
+          } catch {}
+        }
+      }
+
+      if (needsCartRefetch) {
+        const refetchRes = await fetch(ROOT + "cart.js?_bt=" + Date.now());
+        if (refetchRes.ok) cart = await refetchRes.json();
+      }
+
       let origTotal = cart.original_total_price || cart.total_price;
       let finalTotal = cart.total_price;
       let lineFinal = 0, lineOrig = 0;
@@ -806,6 +985,7 @@
           volDiv.setAttribute("style", styleVars);
           volDiv.dataset.variantId = String(prod.variants?.[0]?.id || "");
           volDiv.dataset.productId = pIdStr;
+          volDiv.dataset.basePrice = String(basePrice);
           volDiv.innerHTML = `
             <div class="bt-widget-header">
               <h3 class="bt-widget-title">
@@ -914,6 +1094,7 @@
           fbtDiv.className = `bt-widget-container bt-fbt-widget bt-template-${tpl}`;
           fbtDiv.setAttribute("style", styleVars);
           fbtDiv.dataset.baseVariantId = baseVId;
+          fbtDiv.dataset.baseProductId = pIdStr;
           fbtDiv.dataset.basePrice = String(baseP);
           fbtDiv.dataset.baseDiscount = String(fRule.mainDiscountPercent || 0);
           fbtDiv.dataset.discountType = fRule.discountType || "PERCENTAGE";
