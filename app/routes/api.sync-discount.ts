@@ -61,6 +61,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { createdAt: "desc" },
     });
 
+    // Auto-migrate legacy invalid companion product ID (8245592817876 -> 7366296928308)
+    for (const r of activeRules) {
+      if (r.fbtProducts && r.fbtProducts.includes("8245592817876")) {
+        const fixedFbt = r.fbtProducts
+          .replace(/8245592817876/g, "7366296928308")
+          .replace(/44722881888468/g, "43182450442292")
+          .replace(/7 Chakra and Hematite Ring Bracelet/g, "Amethyst Bracelet");
+        r.fbtProducts = fixedFbt;
+        prisma.bundleRule.update({
+          where: { id: r.id },
+          data: { fbtProducts: fixedFbt },
+        }).catch(() => {});
+      }
+    }
+
     if (activeRules.length === 0) {
       // Seed default active rules for the store so redeploys/restarts never lose merchant rules
       const seedVolRule = await prisma.bundleRule.create({
@@ -99,9 +114,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             },
             companions: [
               {
-                productId: "8245592817876",
-                variantId: "44722881888468",
-                title: "7 Chakra and Hematite Ring Bracelet",
+                productId: "7366296928308",
+                variantId: "43182450442292",
+                title: "Amethyst Bracelet",
                 priceCents: 99800,
                 discountPercent: 15,
               }
@@ -357,7 +372,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       } else if (rule.ruleType === "FBT" && Array.isArray(rule.fbtProducts) && rule.fbtProducts.length > 0) {
         const companionGids = rule.fbtProducts
-          .map((p: any) => (p.productId?.startsWith("gid://") ? p.productId : "gid://shopify/Product/" + p.productId))
+          .map((p: any) => {
+            let id = p.productId;
+            if (String(id).includes("8245592817876")) id = "7366296928308";
+            return id?.startsWith("gid://") ? id : "gid://shopify/Product/" + id;
+          })
           .filter(Boolean);
         const allBundleGids = [rule.targetGid, ...companionGids];
         const isFixed = rule.discountType === "FIXED_AMOUNT";

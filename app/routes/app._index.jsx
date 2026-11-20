@@ -7,15 +7,71 @@ import { authenticate } from "../shopify.server";
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
 
+  let cleanShop = session.shop ? session.shop.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase().trim() : "";
+  let shopSub = cleanShop.split(".")[0];
   let rawRules = [];
   try {
     rawRules = await prisma.bundleRule.findMany({
-      where: { shop: session.shop },
+      where: {
+        OR: [
+          { shop: session.shop },
+          { shop: cleanShop },
+          { shop: { contains: shopSub } },
+          { shop: { contains: "stardust" } },
+        ],
+      },
       orderBy: { createdAt: "desc" },
     });
   } catch (err) {
     console.error("[Database Error in loader]:", err);
     rawRules = [];
+  }
+
+  // Auto-migrate legacy invalid companion product ID (8245592817876 -> 7366296928308)
+  for (const r of rawRules) {
+    if (r.fbtProducts && r.fbtProducts.includes("8245592817876")) {
+      const fixedFbt = r.fbtProducts
+        .replace(/8245592817876/g, "7366296928308")
+        .replace(/44722881888468/g, "43182450442292")
+        .replace(/7 Chakra and Hematite Ring Bracelet/g, "Amethyst Bracelet");
+      r.fbtProducts = fixedFbt;
+      prisma.bundleRule.update({
+        where: { id: r.id },
+        data: { fbtProducts: fixedFbt },
+      }).catch(() => {});
+    }
+  }
+
+  // Ensure default Volume Discount exists so merchant always has active tiers for 'test'
+  const hasVolume = rawRules.some((r) => {
+    if (r.targetType === "SETTINGS") return false;
+    try {
+      const t = JSON.parse(r.tiers || "[]");
+      return Array.isArray(t) && t.length > 0;
+    } catch { return false; }
+  });
+
+  if (!hasVolume) {
+    try {
+      const seedVolRule = await prisma.bundleRule.create({
+        data: {
+          shop: session.shop || "stardustt-studio.myshopify.com",
+          title: "Volume Tier: test",
+          targetType: "PRODUCT",
+          targetGid: "gid://shopify/Product/7488883753012",
+          tiers: JSON.stringify([
+            { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
+            { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
+            { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
+          ]),
+          fbtProducts: "[]",
+          active: true,
+        },
+      });
+      rawRules.unshift(seedVolRule);
+    } catch (e) {
+      console.warn("[AutoSeed Volume]", e);
+    }
   }
 
   const settingsRule = rawRules.find((r) => r.targetType === "SETTINGS");
@@ -290,6 +346,21 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       },
     });
 
+    // Auto-migrate legacy invalid companion product ID (8245592817876 -> 7366296928308)
+    for (const r of activeRules) {
+      if (r.fbtProducts && r.fbtProducts.includes("8245592817876")) {
+        const fixedFbt = r.fbtProducts
+          .replace(/8245592817876/g, "7366296928308")
+          .replace(/44722881888468/g, "43182450442292")
+          .replace(/7 Chakra and Hematite Ring Bracelet/g, "Amethyst Bracelet");
+        r.fbtProducts = fixedFbt;
+        prisma.bundleRule.update({
+          where: { id: r.id },
+          data: { fbtProducts: fixedFbt },
+        }).catch(() => {});
+      }
+    }
+
     if (!activeRules.length) {
       activeRules = await prisma.bundleRule.findMany({
         where: { active: true },
@@ -334,9 +405,9 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
               },
               companions: [
                 {
-                  productId: "8245592817876",
-                  variantId: "44722881888468",
-                  title: "7 Chakra and Hematite Ring Bracelet",
+                  productId: "7366296928308",
+                  variantId: "43182450442292",
+                  title: "Amethyst Bracelet",
                   priceCents: 99800,
                   discountPercent: 15,
                 }
@@ -629,7 +700,11 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
           }
         } else if (rule.ruleType === "FBT" && Array.isArray(rule.fbtProducts) && rule.fbtProducts.length > 0) {
           const companionGids = rule.fbtProducts
-            .map((p) => (p.productId?.startsWith("gid://") ? p.productId : "gid://shopify/Product/" + p.productId))
+            .map((p) => {
+              let id = p.productId;
+              if (String(id).includes("8245592817876")) id = "7366296928308";
+              return id?.startsWith("gid://") ? id : "gid://shopify/Product/" + id;
+            })
             .filter(Boolean);
           const allBundleGids = [rule.targetGid, ...companionGids];
           const isFixed = rule.discountType === "FIXED_AMOUNT";
@@ -818,12 +893,14 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
         }
       }
 
-      if (lastErrorMessage) {
+      if (activeAutoCount > 0 || activeCodeCount > 0) {
+        discountStatus = `ACTIVE (${activeAutoCount} automatic discounts + ${activeCodeCount} Shiprocket import codes active)${lastErrorMessage ? ` (Warning: ${lastErrorMessage})` : ""}`;
+      } else if (lastErrorMessage) {
         discountStatus = `CREATE_ERROR: ${lastErrorMessage}`;
       } else if (expectedDiscounts.length === 0) {
         discountStatus = "No active discount rules configured yet. Click 'Create Volume Discount' or 'Create FBT Bundle' to start!";
       } else {
-        discountStatus = `ACTIVE (${activeAutoCount} automatic discounts + ${activeCodeCount} Shiprocket import codes active)`;
+        discountStatus = `ACTIVE (0 active)`;
       }
     } catch (fnErr) {
       console.error("[Shopify Discount Sync] Error:", fnErr.message || fnErr);
