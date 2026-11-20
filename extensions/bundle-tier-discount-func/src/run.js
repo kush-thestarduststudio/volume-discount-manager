@@ -3,14 +3,19 @@
 /**
  * @typedef {Object} DiscountTier
  * @property {number} minQuantity
- * @property {number} discountPercent
+ * @property {number} [discountPercent]
+ * @property {number} [discountValue]
+ * @property {string} [discountType]
  * @property {string} [label]
  */
 
 /**
  * @typedef {Object} FbtProduct
  * @property {string} productId
- * @property {number} discountPercent
+ * @property {string} [variantId]
+ * @property {number} [discountPercent]
+ * @property {number} [discountValue]
+ * @property {string} [discountType]
  * @property {string} [title]
  */
 
@@ -20,6 +25,8 @@
  * @property {string} [ruleType]
  * @property {string} targetType - "PRODUCT" | "COLLECTION"
  * @property {string} targetGid
+ * @property {string} [discountType]
+ * @property {number} [discountValue]
  * @property {number} [mainDiscountPercent]
  * @property {DiscountTier[]} [tiers]
  * @property {FbtProduct[]} [fbtProducts]
@@ -35,6 +42,10 @@
 const EMPTY_RESULT = {
   operations: [],
 };
+
+function cleanId(id) {
+  return String(id || "").replace(/\D/g, "");
+}
 
 /**
  * Primary function entry point for cart.lines.discounts.generate.run
@@ -71,15 +82,22 @@ export function cartLinesDiscountsGenerateRun(input) {
   /** @type {any[]} */
   const candidates = [];
 
-  // 1. Group cart lines by Product ID
+  // 1. Group cart lines by Product ID (supports both full GID and numeric string IDs)
   /** @type {Map<string, any[]>} */
   const productLineMap = new Map();
   for (const line of lines) {
-    const prodId = line.merchandise?.product?.id;
-    if (prodId) {
-      const list = productLineMap.get(prodId) || [];
+    const prodGid = line.merchandise?.product?.id;
+    if (prodGid) {
+      const list = productLineMap.get(prodGid) || [];
       list.push(line);
-      productLineMap.set(prodId, list);
+      productLineMap.set(prodGid, list);
+
+      const numId = cleanId(prodGid);
+      if (numId && numId !== prodGid) {
+        const numList = productLineMap.get(numId) || [];
+        numList.push(line);
+        productLineMap.set(numId, numList);
+      }
     }
   }
 
@@ -94,6 +112,9 @@ export function cartLinesDiscountsGenerateRun(input) {
   // PART 1: VOLUME / TIER DISCOUNTS (EVALUATED PER PRODUCT, BEST DISCOUNT WINS)
   // =========================================================================
   for (const [prodId, prodLines] of productLineMap.entries()) {
+    // Only process full GIDs in the outer loop to avoid double-processing
+    if (!prodId.startsWith("gid://")) continue;
+
     // Exclude companion bundle items so volume discounts and FBT companions never conflict
     const volumeLines = prodLines.filter(
       (l) => l.bundleAttr?.value !== "fbt_companion"
@@ -111,7 +132,7 @@ export function cartLinesDiscountsGenerateRun(input) {
 
     // Find all volume rules that match this product (Product-level OR Collection-level)
     const matchingProductRules = volumeRules.filter(
-      (r) => r.targetType === "PRODUCT" && r.targetGid === prodId
+      (r) => r.targetType === "PRODUCT" && (r.targetGid === prodId || cleanId(r.targetGid) === cleanId(prodId))
     );
     const matchingCollectionRules = volumeRules.filter(
       (r) => r.targetType === "COLLECTION" && isInAnyCollection
@@ -126,12 +147,13 @@ export function cartLinesDiscountsGenerateRun(input) {
 
     /** @type {DiscountTier | null} */
     let bestTier = null;
+    let maxPct = 0;
 
     // Evaluate all applicable rules and select the tier giving HIGHEST discount percent
     for (const rule of applicableRules) {
       const sortedTiers = (rule.tiers || [])
         .slice()
-        .filter((t) => t.minQuantity > 0 && t.discountPercent > 0)
+        .filter((t) => (t.minQuantity || 0) > 0 && ((t.discountPercent || 0) > 0 || (t.discountValue || 0) > 0))
         .sort((a, b) => a.minQuantity - b.minQuantity);
 
       let matchedTier = null;
@@ -142,19 +164,27 @@ export function cartLinesDiscountsGenerateRun(input) {
       }
 
       if (matchedTier) {
-        if (!bestTier || matchedTier.discountPercent > bestTier.discountPercent) {
+        const pct = matchedTier.discountPercent ?? matchedTier.discountValue ?? 0;
+        if (!bestTier || pct > maxPct) {
           bestTier = matchedTier;
+          maxPct = pct;
         }
       }
     }
 
     // Apply winning discount tier to this product's cart lines
     // EXACT QUANTITY ONLY: discount only up to bestTier.minQuantity units! Extra units remain full price!
-    if (bestTier && bestTier.discountPercent > 0) {
+    if (bestTier && maxPct > 0) {
       const exactTierQty = bestTier.minQuantity;
-      const discountVal = String(bestTier.discountPercent.toFixed(1));
+      const isFixed = bestTier.discountType === "FIXED_AMOUNT";
+      const val = bestTier.discountValue ?? (bestTier.discountPercent || maxPct);
+      const discountVal = String(Number(val).toFixed(isFixed ? 2 : 1));
       const message =
-        bestTier.label || `Buy ${exactTierQty} (${discountVal}% OFF)`;
+        bestTier.label || `Buy ${exactTierQty} (${isFixed ? `₹${val}` : `${discountVal}%`} OFF)`;
+
+      const candidateValue = isFixed
+        ? { fixedAmount: { amount: discountVal, appliesToEachItem: false } }
+        : { percentage: { value: discountVal } };
 
       let remainingTierUnitsToDiscount = exactTierQty;
 
@@ -180,11 +210,7 @@ export function cartLinesDiscountsGenerateRun(input) {
                     },
                   },
                 ],
-                value: {
-                  percentage: {
-                    value: discountVal,
-                  },
-                },
+                value: candidateValue,
               });
             }
           }
@@ -206,11 +232,7 @@ export function cartLinesDiscountsGenerateRun(input) {
                   },
                 },
               ],
-              value: {
-                percentage: {
-                  value: discountVal,
-                },
-              },
+              value: candidateValue,
             });
           }
         }
@@ -222,14 +244,18 @@ export function cartLinesDiscountsGenerateRun(input) {
   // PART 2: FREQUENTLY BOUGHT TOGETHER (FBT) BUNDLES (INDEPENDENT DISCOUNTS)
   // =========================================================================
   for (const rule of fbtRules) {
-    const triggerLines = productLineMap.get(rule.targetGid) || [];
+    const triggerGid = rule.targetGid;
+    const triggerNum = cleanId(rule.targetGid);
+    const triggerLines = productLineMap.get(triggerGid) || (triggerNum ? productLineMap.get(triggerNum) : null) || [];
     if (triggerLines.length === 0) continue;
 
     /** @type {{ fbtItem: FbtProduct, line: any }[]} */
     const matchedCompanions = [];
 
     for (const fbtItem of rule.fbtProducts || []) {
-      const companionLines = productLineMap.get(fbtItem.productId) || [];
+      const pId = fbtItem.productId;
+      const pNum = cleanId(fbtItem.productId);
+      const companionLines = productLineMap.get(pId) || (pNum ? productLineMap.get(pNum) : null) || [];
       if (companionLines.length > 0) {
         matchedCompanions.push({ fbtItem, line: companionLines[0] });
       }
@@ -261,7 +287,7 @@ export function cartLinesDiscountsGenerateRun(input) {
 
       // B) Apply discount to companion items
       for (const { fbtItem, line } of matchedCompanions) {
-        const fbtDiscountVal = String((fbtItem.discountPercent || 10).toFixed(1));
+        const fbtDiscountVal = String((fbtItem.discountPercent || mainDiscPct || 10).toFixed(1));
         candidates.push({
           message: `Bundle: ${fbtItem.title || "Companion"} (${fbtDiscountVal}% OFF)`,
           targets: [

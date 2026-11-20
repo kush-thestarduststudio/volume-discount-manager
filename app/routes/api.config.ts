@@ -73,66 +73,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
     }
 
-    // If query by shop returns nothing, fetch any active rules or seed default
+    // If query by shop returns nothing, fetch any active rules
     if (!rules.length) {
       rules = await prisma.bundleRule.findMany({
         where: { active: true },
         orderBy: { createdAt: "desc" },
       });
-    }
-
-    if (!rules.length) {
-      try {
-        const seedVolRule = await prisma.bundleRule.create({
-          data: {
-            shop: cleanShop || "stardustt-studio.myshopify.com",
-            title: "Volume Tier: test",
-            targetType: "PRODUCT",
-            targetGid: "gid://shopify/Product/7488883753012",
-            tiers: JSON.stringify([
-              { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
-              { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
-              { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
-            ]),
-            fbtProducts: "[]",
-            active: true,
-          },
-        });
-
-        const seedFbtRule = await prisma.bundleRule.create({
-          data: {
-            shop: cleanShop || "stardustt-studio.myshopify.com",
-            title: "Bundle for: test",
-            targetType: "PRODUCT",
-            targetGid: "gid://shopify/Product/7488883753012",
-            tiers: "[]",
-            fbtProducts: JSON.stringify({
-              mainDiscountPercent: 10,
-              discountType: "PERCENTAGE",
-              discountValue: 10,
-              triggerProduct: {
-                id: "7488883753012",
-                variantId: "46920435957812",
-                title: "test",
-                priceCents: 40000,
-                image: ""
-              },
-              companions: [
-                {
-                  productId: "15454599512116",
-                  variantId: "67910792216628",
-                  title: "Mahalakshmi (Dhan) Flora Masala Agarbatti",
-                  priceCents: 19900,
-                  image: "https://cdn.shopify.com/s/files/1/0634/3272/0436/files/mahalaksmi_agarbatti_price.webp?v=1794561818",
-                  discountPercent: 10,
-                }
-              ]
-            }),
-            active: true,
-          },
-        });
-        rules = [seedVolRule, seedFbtRule];
-      } catch {}
     }
 
     let widgetSettings = {

@@ -255,7 +255,7 @@ export async function createVolumeCampaign(options: {
       startsAt,
       discountClasses: ["PRODUCT"],
       combinesWith: {
-        orderDiscounts: false,
+        orderDiscounts: true,
         productDiscounts: true,
         shippingDiscounts: true,
       },
@@ -339,7 +339,7 @@ export async function createBundleCampaign(options: {
       startsAt,
       discountClasses: ["PRODUCT"],
       combinesWith: {
-        orderDiscounts: false,
+        orderDiscounts: true,
         productDiscounts: true,
         shippingDiscounts: true,
       },
@@ -427,7 +427,7 @@ export async function createFbtCampaign(options: {
       startsAt,
       discountClasses: ["PRODUCT"],
       combinesWith: {
-        orderDiscounts: false,
+        orderDiscounts: true,
         productDiscounts: true,
         shippingDiscounts: true,
       },

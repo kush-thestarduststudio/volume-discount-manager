@@ -61,71 +61,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { createdAt: "desc" },
     });
 
-    // Auto-migrate legacy invalid companion product ID (8245592817876 -> 7366296928308)
+    // Auto-migrate legacy invalid companion product ID (8245592817876 / 7366296928308 -> 15454599512116)
     for (const r of activeRules) {
-      if (r.fbtProducts && r.fbtProducts.includes("8245592817876")) {
+      if (r.fbtProducts && (r.fbtProducts.includes("8245592817876") || r.fbtProducts.includes("7366296928308"))) {
         const fixedFbt = r.fbtProducts
-          .replace(/8245592817876/g, "7366296928308")
-          .replace(/44722881888468/g, "43182450442292")
-          .replace(/7 Chakra and Hematite Ring Bracelet/g, "Amethyst Bracelet");
+          .replace(/8245592817876|7366296928308/g, "15454599512116")
+          .replace(/44722881888468|43182450442292/g, "67910792216628")
+          .replace(/7 Chakra and Hematite Ring Bracelet|Amethyst Bracelet/g, "Mahalakshmi (Dhan) Flora Masala Agarbatti");
         r.fbtProducts = fixedFbt;
         prisma.bundleRule.update({
           where: { id: r.id },
           data: { fbtProducts: fixedFbt },
         }).catch(() => {});
       }
-    }
-
-    if (activeRules.length === 0) {
-      // Seed default active rules for the store so redeploys/restarts never lose merchant rules
-      const seedVolRule = await prisma.bundleRule.create({
-        data: {
-          shop: shop || "stardustt-studio.myshopify.com",
-          title: "Volume Tier: test",
-          targetType: "PRODUCT",
-          targetGid: "gid://shopify/Product/7488883753012",
-          tiers: JSON.stringify([
-            { minQuantity: 2, discountPercent: 10, discountType: "PERCENTAGE", discountValue: 10, label: "Buy 2 - Save 10%", code: "TEST-BUY2-10OFF" },
-            { minQuantity: 3, discountPercent: 15, discountType: "PERCENTAGE", discountValue: 15, label: "Buy 3 - Save 15%", code: "TEST-BUY3-15OFF" },
-            { minQuantity: 4, discountPercent: 20, discountType: "PERCENTAGE", discountValue: 20, label: "Buy 4 - Save 20%", code: "TEST-BUY4-20OFF" },
-          ]),
-          fbtProducts: "[]",
-          active: true,
-        },
-      });
-
-      const seedFbtRule = await prisma.bundleRule.create({
-        data: {
-          shop: shop || "stardustt-studio.myshopify.com",
-          title: "Bundle for: test",
-          targetType: "PRODUCT",
-          targetGid: "gid://shopify/Product/7488883753012",
-          tiers: "[]",
-          fbtProducts: JSON.stringify({
-            mainDiscountPercent: 15,
-            discountType: "PERCENTAGE",
-            discountValue: 15,
-            triggerProduct: {
-              id: "7488883753012",
-              variantId: "46920435957812",
-              title: "test",
-              priceCents: 40000,
-              image: ""
-            },
-            companions: [
-              {
-                productId: "7366296928308",
-                variantId: "43182450442292",
-                title: "Amethyst Bracelet",
-                priceCents: 99800,
-                discountPercent: 15,
-              }
-            ]
-          }),
-          active: true,
-        },
-      });
-      activeRules = [seedVolRule, seedFbtRule];
     }
 
     const activeRulesPayload = activeRules.map((r) => {
@@ -374,7 +322,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         const companionGids = rule.fbtProducts
           .map((p: any) => {
             let id = p.productId;
-            if (String(id).includes("8245592817876")) id = "7366296928308";
+            if (String(id).includes("8245592817876") || String(id).includes("7366296928308")) id = "15454599512116";
             return id?.startsWith("gid://") ? id : "gid://shopify/Product/" + id;
           })
           .filter(Boolean);
@@ -495,6 +443,109 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       );
       createResults.push({ title: exp.codeTitle, code: exp.code, result: createCodeRes });
+    }
+
+    // 3. Ensure Shopify Function Automatic App Discount is synced with combinesWith
+    let appDiscountResult: any = null;
+    try {
+      const funcRes = await graphql(`
+        query FindShopifyFunctions {
+          shopifyFunctions(first: 25) {
+            nodes {
+              id
+              title
+              apiType
+            }
+          }
+        }
+      `);
+      const funcNodes = funcRes?.data?.shopifyFunctions?.nodes || [];
+      const targetFunc = funcNodes.find(
+        (n: any) => n.title?.includes("bundle-tier") || n.title?.includes("volume-discount")
+      ) || funcNodes[0];
+
+      if (targetFunc?.id) {
+        const functionId = targetFunc.id;
+        const existingAppDiscount = allNodes.find(
+          (n: any) => n.discount?.__typename === "DiscountAutomaticApp" &&
+                 (n.discount?.title?.includes("Volume & FBT") || n.discount?.title?.includes("Bundle & Tier"))
+        );
+
+        if (existingAppDiscount) {
+          appDiscountResult = await graphql(
+            `mutation UpdateCombinedVolumeDiscount($id: ID!, $discount: DiscountAutomaticAppInput!) {
+              discountAutomaticAppUpdate(id: $id, automaticAppDiscount: $discount) {
+                automaticAppDiscount {
+                  discountId
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
+                userErrors { field message }
+              }
+            }`,
+            {
+              id: existingAppDiscount.id,
+              discount: {
+                title: "Volume & FBT Bundle Discount",
+                combinesWith: {
+                  orderDiscounts: true,
+                  productDiscounts: true,
+                  shippingDiscounts: true,
+                },
+                metafields: [
+                  {
+                    namespace: "$app:bundle_tiers",
+                    key: "config",
+                    type: "json",
+                    value: JSON.stringify(configPayload),
+                  },
+                ],
+              },
+            }
+          );
+        } else {
+          appDiscountResult = await graphql(
+            `mutation CreateCombinedVolumeDiscount($discount: DiscountAutomaticAppInput!) {
+              discountAutomaticAppCreate(automaticAppDiscount: $discount) {
+                automaticAppDiscount {
+                  discountId
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
+                userErrors { field message }
+              }
+            }`,
+            {
+              discount: {
+                title: "Volume & FBT Bundle Discount",
+                functionId,
+                startsAt: new Date().toISOString(),
+                combinesWith: {
+                  orderDiscounts: true,
+                  productDiscounts: true,
+                  shippingDiscounts: true,
+                },
+                metafields: [
+                  {
+                    namespace: "$app:bundle_tiers",
+                    key: "config",
+                    type: "json",
+                    value: JSON.stringify(configPayload),
+                  },
+                ],
+              },
+            }
+          );
+        }
+      }
+    } catch (funcErr) {
+      console.warn("[AppDiscountSync] Warning:", funcErr);
     }
 
     return new Response(
