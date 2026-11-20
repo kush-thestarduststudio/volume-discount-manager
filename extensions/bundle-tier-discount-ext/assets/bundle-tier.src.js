@@ -497,6 +497,11 @@
       }
       const raw = localStorage.getItem("__btRules") || localStorage.getItem("bt_rules_cache");
       if (raw) {
+        if (raw.includes("Amethyst") || raw.includes("7366296928308") || raw.includes("8245592817876")) {
+          localStorage.removeItem("__btRules");
+          localStorage.removeItem("bt_rules_cache");
+          return [];
+        }
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
@@ -515,7 +520,7 @@
     if (configCache && Array.isArray(configCache.rules)) return configCache;
     try {
       const shop = window.Shopify?.shop || window.location.hostname;
-      const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}`)).json();
+      const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}&_t=${Date.now()}`)).json();
       if (res?.ok && Array.isArray(res.rules)) {
         configCache = res;
         syncRulesCache = res.rules;
