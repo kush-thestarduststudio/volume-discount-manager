@@ -14,7 +14,7 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
-  // Clear any legacy app discount codes from cookies and localStorage so Shiprocket / Fastrr coupon slot is 100% free for LOYAL
+  // Clear any app discount codes from cookies and localStorage so Fastrr's coupon slot is 100% free for user coupons and Fastrr's "View more coupons" list
   function clearAppCouponCookies() {
     try {
       ["fastrrCouponCode", "discount_code"].forEach((name) => {
@@ -23,6 +23,15 @@
           const val = decodeURIComponent(m[1] || "").toUpperCase();
           if (val.startsWith("TEST-BUY") || val.startsWith("BUNDLE-") || val.includes("-BUY") || val.includes("OFF")) {
             document.cookie = `${name}=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            document.cookie = `${name}=; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            try {
+              const hostParts = window.location.hostname.split(".");
+              if (hostParts.length > 1) {
+                const rootDomain = hostParts.slice(-2).join(".");
+                document.cookie = `${name}=; domain=.${rootDomain}; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+                document.cookie = `${name}=; domain=.${rootDomain}; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+              }
+            } catch {}
           }
         }
       });
@@ -721,6 +730,14 @@
       // Reconcile line item properties with targetItemPrices via /cart/change.js
       let needsCartRefetch = false;
       for (const item of cart.items) {
+        // Skip free gifts and zero-price items so Fastrr's freebie line items are never touched or dropped!
+        if (!item || item.price === 0 || item.final_price === 0 || (item.title && /free gift|freebie/i.test(item.title))) {
+          continue;
+        }
+        if (item.properties?._is_free_gift || item.properties?._fastrr_freebie) {
+          continue;
+        }
+
         const targetPriceRupees = targetItemPrices.get(item.key) ?? null;
         const currentProps = item.properties || {};
         const isYt = currentProps._isYtBundle === "true";
@@ -750,11 +767,10 @@
               }])
             };
             try {
-              const lineIdx = cart.items.indexOf(item) + 1;
               await fetch(ROOT + "cart/change.js?_bt=1", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ line: lineIdx, id: item.key, quantity: item.quantity, properties: newProps })
+                body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
               });
               needsCartRefetch = true;
             } catch {}
@@ -762,11 +778,10 @@
         } else if (isYt) {
           const newProps = { ...currentProps, _isYtBundle: "", _bundleItems: "" };
           try {
-            const lineIdx = cart.items.indexOf(item) + 1;
             await fetch(ROOT + "cart/change.js?_bt=1", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ line: lineIdx, id: item.key, quantity: item.quantity, properties: newProps })
+              body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
             });
             needsCartRefetch = true;
           } catch {}
@@ -867,11 +882,10 @@
         }
       });
 
-      // 3. Storefront API Sync (Exact mechanism Selleasy uses to combine with Shopify Cart & Fastrr Checkout)
+      // 3. Storefront API Sync: Only sync customer's actual manual coupons (e.g. LOYAL)
+      // Volume & Bundle discounts are NATIVE AUTOMATIC DISCOUNTS on Shopify and apply without any coupon code!
+      // Never pass app discount codes (BUNDLE-* / TEST-BUY*) as coupon codes so Fastrr's coupon slot remains 100% free for coupons and doesn't block Fastrr automatic discounts / freebies!
       const targetCodes = [];
-      if (disc > 0 && appDiscountCode) {
-        targetCodes.push(appDiscountCode);
-      }
       customerCoupons.forEach((c) => {
         if (c && !targetCodes.includes(c)) {
           targetCodes.push(c);
@@ -912,15 +926,15 @@
         }
       }
 
-      // Fastrr / Shiprocket Cookie & localStorage Management (for Smart Cart checkout payload)
-      if (disc > 0 && appDiscountCode) {
-        if (!customerCoupons.length) {
-          document.cookie = `discount_code=${appDiscountCode}; path=/; SameSite=None; Secure`;
-          document.cookie = `fastrrCouponCode=${appDiscountCode}; path=/; SameSite=None; Secure`;
-          try { localStorage.setItem("fastrrCouponCode", appDiscountCode); } catch {}
-        } else {
-          try { localStorage.setItem("fastrrCouponCode", customerCoupons[0]); } catch {}
-        }
+      // Fastrr / Shiprocket Cookie & localStorage Management:
+      // ALWAYS keep coupon slot free for customer coupons or Fastrr's "View more coupons" list.
+      // If customer applied a manual coupon (e.g. LOYAL), forward it to Fastrr.
+      // If no customer coupon is applied, thoroughly clear app coupon cookies so Fastrr shows all available coupons and doesn't drop free gifts!
+      if (customerCoupons.length > 0) {
+        const custCode = customerCoupons[0];
+        document.cookie = `discount_code=${custCode}; path=/; SameSite=None; Secure`;
+        document.cookie = `fastrrCouponCode=${custCode}; path=/; SameSite=None; Secure`;
+        try { localStorage.setItem("fastrrCouponCode", custCode); } catch {}
       } else {
         clearAppCouponCookies();
       }
