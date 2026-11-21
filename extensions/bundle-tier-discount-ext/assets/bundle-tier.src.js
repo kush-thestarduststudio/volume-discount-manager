@@ -768,18 +768,17 @@
       }
 
       // Fastrr / Shiprocket Cookie & localStorage Management:
-      // If customer applied a manual coupon (e.g. LOYAL), prioritize passing it to Fastrr.
-      // If no customer coupon is applied, but bundle is active, forward bundle code to Fastrr.
-      // If neither is applied, clear app coupon cookies so Fastrr shows all available coupons and doesn't drop free gifts!
-      if (customerCoupons.length > 0) {
-        const custCode = customerCoupons[0];
-        document.cookie = `discount_code=${custCode}; path=/; SameSite=None; Secure`;
-        document.cookie = `fastrrCouponCode=${custCode}; path=/; SameSite=None; Secure`;
-        try { localStorage.setItem("fastrrCouponCode", custCode); } catch {}
-      } else if (disc > 0 && code) {
-        document.cookie = `discount_code=${code}; path=/; SameSite=None; Secure`;
-        document.cookie = `fastrrCouponCode=${code}; path=/; SameSite=None; Secure`;
-        try { localStorage.setItem("fastrrCouponCode", code); } catch {}
+      // Shopify natively combines comma-separated discount codes (e.g. BUNDLE-TEST-10OFF,LOYAL).
+      // Fastrr's single coupon slot accepts the customer's selected coupon (e.g. LOYAL) or bundle code.
+      if (targetCodes.length > 0) {
+        const combinedCodes = targetCodes.join(",");
+        document.cookie = `discount_code=${combinedCodes}; path=/; SameSite=None; Secure`;
+        const primaryCode = customerCoupons[0] || (disc > 0 && code ? code : targetCodes[0]);
+        document.cookie = `fastrrCouponCode=${primaryCode}; path=/; SameSite=None; Secure`;
+        try {
+          localStorage.setItem("fastrrCouponCode", primaryCode);
+          localStorage.setItem("fastrrCouponCodes", JSON.stringify(targetCodes));
+        } catch {}
       } else {
         clearAppCouponCookies();
       }

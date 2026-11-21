@@ -7,7 +7,7 @@ async function run() {
     body: JSON.stringify({
       items: [
         { id: 46920435957812, quantity: 1 },
-        { id: 67910792216628, quantity: 1 }
+        { id: 67911497547828, quantity: 1 }
       ]
     })
   });
@@ -17,6 +17,8 @@ async function run() {
   });
   const cart = await cartRes.json();
   const cartId = `gid://shopify/Cart/${cart.token}`;
+  console.log('Cart Items in cart.js:');
+  cart.items.forEach(it => console.log(`  ${it.title} - ₹${it.price / 100} x ${it.quantity} (variant: ${it.variant_id}, product: ${it.product_id})`));
 
   const query = `
     mutation cartDiscountCodesUpdate($id: ID!, $discountCodes: [String!]!) {
@@ -52,7 +54,29 @@ async function run() {
     }
   `;
 
-  const sfRes = await fetch('https://thestarduststudio.com/api/2024-04/graphql.json', {
+  // First test with NO discount code (checking automatic discount)
+  const sfRes1 = await fetch('https://thestarduststudio.com/api/2024-04/graphql.json', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Storefront-Access-Token': token,
+      'Cookie': cookie
+    },
+    body: JSON.stringify({
+      query,
+      variables: { id: cartId, discountCodes: [] }
+    })
+  });
+  const sfData1 = await sfRes1.json();
+  console.log('\n--- Storefront Cart (NO code): ---');
+  console.log('Cost:', JSON.stringify(sfData1.data?.cartDiscountCodesUpdate?.cart?.cost));
+  console.log('Line discounts:');
+  sfData1.data?.cartDiscountCodesUpdate?.cart?.lines?.nodes?.forEach(l => {
+    console.log('  Line cost:', l.cost, 'allocations:', l.discountAllocations);
+  });
+
+  // Second test WITH BUNDLE-TEST-10OFF
+  const sfRes2 = await fetch('https://thestarduststudio.com/api/2024-04/graphql.json', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -64,11 +88,14 @@ async function run() {
       variables: { id: cartId, discountCodes: ['BUNDLE-TEST-10OFF'] }
     })
   });
-  const sfData = await sfRes.json();
-  console.log('User errors:', sfData.data?.cartDiscountCodesUpdate?.userErrors);
-  console.log('Discount codes:', sfData.data?.cartDiscountCodesUpdate?.cart?.discountCodes);
-  console.log('Lines:', JSON.stringify(sfData.data?.cartDiscountCodesUpdate?.cart?.lines, null, 2));
-  console.log('Cost:', JSON.stringify(sfData.data?.cartDiscountCodesUpdate?.cart?.cost, null, 2));
+  const sfData2 = await sfRes2.json();
+  console.log('\n--- Storefront Cart (WITH BUNDLE-TEST-10OFF): ---');
+  console.log('Discount codes:', sfData2.data?.cartDiscountCodesUpdate?.cart?.discountCodes);
+  console.log('Cost:', JSON.stringify(sfData2.data?.cartDiscountCodesUpdate?.cart?.cost));
+  console.log('Line discounts:');
+  sfData2.data?.cartDiscountCodesUpdate?.cart?.lines?.nodes?.forEach(l => {
+    console.log('  Line cost:', l.cost, 'allocations:', l.discountAllocations);
+  });
 
   // Clean up
   await fetch('https://thestarduststudio.com/cart/clear.js', {

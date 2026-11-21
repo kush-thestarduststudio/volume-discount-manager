@@ -355,6 +355,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     const allNodes = discountData?.data?.discountNodes?.nodes || [];
 
+    const storeCombinesResults: any[] = [];
+
     // Ensure two-way discount combination compatibility on all existing store discounts (e.g. LOYAL, FREEGIFT..., WEALTH)
     for (const node of allNodes) {
       const disc = node.discount;
@@ -366,7 +368,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (!cw.orderDiscounts || !cw.productDiscounts || !cw.shippingDiscounts) {
         try {
           if (disc.__typename === "DiscountCodeBasic") {
-            await graphql(
+            const res = await graphql(
               `mutation UpdateStoreCodeDiscountCombines($id: ID!, $basicCodeDiscount: DiscountCodeBasicInput!) {
                 discountCodeBasicUpdate(id: $id, basicCodeDiscount: $basicCodeDiscount) {
                   codeDiscountNode { id }
@@ -384,8 +386,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 },
               }
             );
+            storeCombinesResults.push({ id: node.id, title, typename: disc.__typename, res });
           } else if (disc.__typename === "DiscountAutomaticBasic") {
-            await graphql(
+            const res = await graphql(
               `mutation UpdateStoreAutoBasicDiscountCombines($id: ID!, $automaticBasicDiscount: DiscountAutomaticBasicInput!) {
                 discountAutomaticBasicUpdate(id: $id, automaticBasicDiscount: $automaticBasicDiscount) {
                   automaticDiscountNode { id }
@@ -403,8 +406,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 },
               }
             );
+            storeCombinesResults.push({ id: node.id, title, typename: disc.__typename, res });
           } else if (disc.__typename === "DiscountAutomaticBxgy") {
-            await graphql(
+            const res = await graphql(
               `mutation UpdateStoreAutoBxgyDiscountCombines($id: ID!, $automaticBxgyDiscount: DiscountAutomaticBxgyInput!) {
                 discountAutomaticBxgyUpdate(id: $id, automaticBxgyDiscount: $automaticBxgyDiscount) {
                   automaticDiscountNode { id }
@@ -422,8 +426,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 },
               }
             );
+            storeCombinesResults.push({ id: node.id, title, typename: disc.__typename, res });
           } else if (disc.__typename === "DiscountCodeBxgy") {
-            await graphql(
+            const res = await graphql(
               `mutation UpdateStoreCodeBxgyDiscountCombines($id: ID!, $codeBxgyDiscount: DiscountCodeBxgyInput!) {
                 discountCodeBxgyUpdate(id: $id, codeBxgyDiscount: $codeBxgyDiscount) {
                   codeDiscountNode { id }
@@ -441,9 +446,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 },
               }
             );
+            storeCombinesResults.push({ id: node.id, title, typename: disc.__typename, res });
+          } else if (disc.__typename === "DiscountCodeApp") {
+            const res = await graphql(
+              `mutation UpdateStoreCodeAppDiscountCombines($id: ID!, $codeAppDiscount: DiscountCodeAppInput!) {
+                discountCodeAppUpdate(id: $id, codeAppDiscount: $codeAppDiscount) {
+                  codeAppDiscount { discountId }
+                  userErrors { field message }
+                }
+              }`,
+              {
+                id: node.id,
+                codeAppDiscount: {
+                  combinesWith: {
+                    orderDiscounts: true,
+                    productDiscounts: true,
+                    shippingDiscounts: true,
+                  },
+                },
+              }
+            );
+            storeCombinesResults.push({ id: node.id, title, typename: disc.__typename, res });
           }
-        } catch (err) {
+        } catch (err: any) {
           console.warn("[StoreDiscountCombinesUpdate] Error updating:", title, err);
+          storeCombinesResults.push({ id: node.id, title, typename: disc.__typename, error: err?.message || String(err) });
         }
       }
     }
@@ -716,12 +743,63 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       console.warn("[AppDiscountSync] Warning:", funcErr);
     }
 
+    // Refetch discounts to show new combinations status
+    let updatedNodes: any[] = [];
+    try {
+      const updatedData = await graphql(`
+        query {
+          discountNodes(first: 100) {
+            nodes {
+              id
+              discount {
+                __typename
+                ... on DiscountAutomaticBasic {
+                  title
+                  status
+                  combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+                }
+                ... on DiscountAutomaticBxgy {
+                  title
+                  status
+                  combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+                }
+                ... on DiscountAutomaticApp {
+                  title
+                  status
+                  combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+                }
+                ... on DiscountCodeBasic {
+                  title
+                  status
+                  codes(first: 5) { nodes { code } }
+                  combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+                }
+                ... on DiscountCodeBxgy {
+                  title
+                  status
+                  codes(first: 5) { nodes { code } }
+                  combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+                }
+                ... on DiscountCodeApp {
+                  title
+                  status
+                  codes(first: 5) { nodes { code } }
+                  combinesWith { orderDiscounts productDiscounts shippingDiscounts }
+                }
+              }
+            }
+          }
+        }
+      `);
+      updatedNodes = updatedData?.data?.discountNodes?.nodes || [];
+    } catch {}
+
     return new Response(
       JSON.stringify({
         ok: true,
         shop,
         planType: "GROW_OR_STANDARD_AUTOMATIC_DISCOUNT",
-        allDiscounts: allNodes.map((n: any) => ({
+        allDiscounts: (updatedNodes.length ? updatedNodes : allNodes).map((n: any) => ({
           id: n.id,
           typename: n.discount?.__typename,
           title: n.discount?.title,
@@ -729,6 +807,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           combinesWith: n.discount?.combinesWith,
           codes: n.discount?.codes?.nodes?.map((c: any) => c.code) || [],
         })),
+        storeCombinesResults,
+        appDiscountResult,
         expectedDiscounts,
         created: createResults,
         deleted: deleteResults,
