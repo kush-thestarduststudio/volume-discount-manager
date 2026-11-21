@@ -14,10 +14,19 @@
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 
-  // Clear any app discount codes from cookies and localStorage so Fastrr's coupon slot is 100% free for user coupons and Fastrr's "View more coupons" list
+  // Helper to distinguish app/auto discounts from genuine customer discount codes
+  function isAppOrAutoDiscount(codeOrTitle) {
+    if (!codeOrTitle) return true;
+    const u = String(codeOrTitle).trim().toUpperCase();
+    if (u.startsWith("[") || u.startsWith("BUNDLE") || u.startsWith("TEST-BUY") || u.includes("-BUY") || u.startsWith("FREEGIFT")) return true;
+    if (u.includes("OFFER APPLIED") || u.includes("AUTO DISCOUNT") || u.includes("VOLUME") || u.includes("AUTOMATIC") || u.includes("MAIN ITEM") || u.includes("COMPANION")) return true;
+    return false;
+  }
+
+  // Clear any app discount codes from cookies and localStorage so Fastrr's coupon slot is 100% free for customer coupons and Fastrr's "View more coupons" list
   function clearAppCouponCookies() {
     try {
-      ["fastrrCouponCode", "discount_code"].forEach((name) => {
+      ["fastrrCouponCode", "fastrrCouponCodeFromLink", "discount_code"].forEach((name) => {
         document.cookie = `${name}=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
         document.cookie = `${name}=; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
         try {
@@ -26,10 +35,15 @@
             const rootDomain = hostParts.slice(-2).join(".");
             document.cookie = `${name}=; domain=.${rootDomain}; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
             document.cookie = `${name}=; domain=.${rootDomain}; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+            document.cookie = `${name}=; domain=${window.location.hostname}; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
           }
         } catch {}
       });
-      localStorage.removeItem("fastrrCouponCode");
+      try {
+        localStorage.removeItem("fastrrCouponCode");
+        sessionStorage.removeItem("fastrrCouponCode");
+        sessionStorage.removeItem("fastrrCouponCodeFromLink");
+      } catch {}
     } catch {}
   }
 
@@ -90,7 +104,9 @@
       document.dispatchEvent(e);
     });
     try {
+      window.postMessage({ name: "SRSC_UPDATE_CART" }, "*");
       window.updateMiniCartSection?.();
+      window.slideShiprocketSmartCartInFrame?.();
       window.Shiprocket?.refreshCart?.();
       window.Fastrr?.refresh?.();
       window.Fastrr?.cart?.refresh?.();
@@ -114,22 +130,6 @@
 
     const roots = getRoots();
     roots.forEach((root) => {
-      // If Shiprocket Smart Cart is present and renders its own native Bill Summary with discounts or coupons,
-      // allow Shiprocket to manage its live total reactively so coupon apply/remove works seamlessly!
-      const hasAppliedDiscounts = Array.from(root.querySelectorAll?.("*") || []).some(
-        (el) => el.children.length === 0 && /(saved with|coupon discount|auto discount)/i.test(el.textContent || "")
-      );
-      if (hasAppliedDiscounts) {
-        // Only ensure original price strikethrough is visible if present
-        const origEls = Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']"));
-        origEls.forEach((el) => {
-          if (el.textContent !== origStr) el.textContent = origStr;
-          if (el.style.display !== "inline-block") el.style.display = "inline-block";
-          if (el.style.textDecoration !== "line-through") el.style.textDecoration = "line-through";
-        });
-        return;
-      }
-
       const totalEls = Array.from(root.querySelectorAll(".total-price, [class*='total-price']"));
       const origEls = Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']"));
       const subTotalEls = Array.from(root.querySelectorAll(".sr-sub-total"));
@@ -164,7 +164,7 @@
               (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
             );
             if (priceEls.length === 1 && !priceEls[0].textContent.includes(finalStr)) {
-              priceEls[0].innerHTML = `<s style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span>${finalStr}</span>`;
+              priceEls[0].innerHTML = `<s data-bt-s="1" style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span data-bt-span="1">${finalStr}</span>`;
             } else if (priceEls.length >= 2) {
               if (priceEls[0].textContent !== origStr) priceEls[0].textContent = origStr;
               if (priceEls[0].style.display !== "inline-block") priceEls[0].style.display = "inline-block";
@@ -185,7 +185,7 @@
       if (activeFinalCents && activeOrigCents && activeFinalCents < activeOrigCents) {
         updateEstimatedTotal(activeFinalCents, activeOrigCents);
       }
-    }, 100);
+    }, 60);
   });
 
   function attachObservers() {
@@ -201,15 +201,13 @@
             const isAction = target?.closest?.("[class*='qty'], [class*='quantity'], [class*='delete'], [class*='remove'], [class*='coupon'], button, a");
             if (isAction) {
               setTimeout(syncCartDiscount, 100);
-              setTimeout(syncCartDiscount, 400);
-              setTimeout(syncCartDiscount, 900);
+              setTimeout(syncCartDiscount, 500);
             }
           }, true);
           r.addEventListener("change", (e) => {
             if (e.target?.matches?.("input[type='number'], input[name='quantity'], [class*='qty']")) {
               setTimeout(syncCartDiscount, 100);
-              setTimeout(syncCartDiscount, 400);
-              setTimeout(syncCartDiscount, 900);
+              setTimeout(syncCartDiscount, 500);
             }
           }, true);
         } catch {}
@@ -229,10 +227,35 @@
   function clearDrawerEstimatedTotal(cart) {
     activeFinalCents = 0;
     activeOrigCents = 0;
+    const currentTotalStr = cart?.total_price ? fmtPrice(cart.total_price) : "";
     getRoots().forEach((root) => {
-      Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price']")).forEach((el) => {
+      Array.from(root.querySelectorAll(".summary-original-price, [class*='summary-original-price'], s[data-bt-s]")).forEach((el) => {
         el.style.display = "none";
+        if (el.dataset?.btS) el.remove();
       });
+
+      if (currentTotalStr) {
+        Array.from(root.querySelectorAll(".total-price, [class*='total-price'], .sr-sub-total")).forEach((el) => {
+          if (el.textContent !== currentTotalStr) {
+            el.textContent = currentTotalStr;
+          }
+        });
+
+        Array.from(root.querySelectorAll("*")).forEach((lbl) => {
+          if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
+            const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
+            if (container) {
+              container.querySelectorAll("s[data-bt-s]").forEach((s) => s.remove());
+              const priceEls = Array.from(container.querySelectorAll("*")).filter(
+                (p) => /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
+              );
+              priceEls.forEach((p) => {
+                p.textContent = currentTotalStr;
+              });
+            }
+          }
+        });
+      }
     });
   }
 
@@ -306,6 +329,7 @@
               _bundleItems: JSON.stringify([{
                 productId: Number(wrap.dataset.productId || 0),
                 variantId: id,
+                title: wrap.dataset.productTitle || "",
                 quantity: qty,
                 price: unitPriceRupees
               }])
@@ -412,6 +436,7 @@
             _bundleItems: JSON.stringify([{
               productId: Number(wrap.dataset.baseProductId || 0),
               variantId: baseId,
+              title: wrap.dataset.baseTitle || "Main Item",
               quantity: 1,
               price: baseDiscPriceRupees
             }])
@@ -435,6 +460,7 @@
               _bundleItems: JSON.stringify([{
                 productId: cPId,
                 variantId: cId,
+                title: cb.dataset.title || "Companion Item",
                 quantity: 1,
                 price: compDiscPriceRupees
               }])
@@ -479,7 +505,7 @@
       }
       const raw = localStorage.getItem("__btRules") || localStorage.getItem("bt_rules_cache");
       if (raw) {
-        if (raw.includes("Amethyst") || raw.includes("7366296928308") || raw.includes("8245592817876")) {
+        if (raw.includes("Amethyst") || raw.includes("7366296928308")) {
           localStorage.removeItem("__btRules");
           localStorage.removeItem("bt_rules_cache");
           return [];
@@ -655,7 +681,7 @@
             : Math.round(tUnitCents * (100 - bp) / 100) / 100;
           targetItemPrices.set(targetItem.key, tPriceRupees);
 
-          r.fbtProducts.forEach((p, idx) => {
+          r.fbtProducts.forEach((p) => {
             const cpId = String(p.productId || "").replace(/\D/g, "");
             const cpVId = String(p.variantId || "").replace(/\D/g, "");
             const compItem = cart.items.find((it) =>
@@ -782,7 +808,7 @@
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
       // 1. Calculate active app discount
-      const { disc, code: appDiscountCode } = getActiveDiscount(cart, rules);
+      const { disc } = getActiveDiscount(cart, rules);
       if (disc > 0) {
         const ruleFinal = Math.max(0, origTotal - disc);
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
@@ -794,15 +820,12 @@
 
       if (Array.isArray(cart.cart_level_discount_applications) && cart.cart_level_discount_applications.length > 0) {
         cart.cart_level_discount_applications.forEach((app) => {
-          // NEVER treat automatic discounts (like TEST BUNDLE-10 or WEALTH or LORDSHIVA) as manual customer coupons!
-          if (app.type === "discount_code") {
-            const title = (app.title || "").trim();
-            const upper = title.toUpperCase();
-            if (upper && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
-              if (!customerCoupons.includes(title)) customerCoupons.push(title);
-              const amt = Number(app.total_allocated_amount || 0);
-              if (amt > 0) manualCouponAmount += amt;
-            }
+          if (app.type === "automatic") return;
+          const title = (app.title || "").trim();
+          if (!isAppOrAutoDiscount(title)) {
+            if (!customerCoupons.includes(title)) customerCoupons.push(title);
+            const amt = Number(app.total_allocated_amount || 0);
+            if (amt > 0) manualCouponAmount += amt;
           }
         });
       }
@@ -810,71 +833,57 @@
       if (Array.isArray(cart.discount_codes)) {
         cart.discount_codes.forEach((dc) => {
           const c = (dc.code || "").trim();
-          const upper = c.toUpperCase();
-          if (c && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
+          if (!isAppOrAutoDiscount(c)) {
             if (!customerCoupons.includes(c)) customerCoupons.push(c);
             const amt = Number(dc.amount || 0);
-            if (amt > 0) manualCouponAmount = Math.max(manualCouponAmount, amt);
+            if (amt > 0 && manualCouponAmount === 0) manualCouponAmount += amt;
           }
         });
       }
 
       getRoots().forEach((root) => {
-        // Parse Shiprocket Bill Summary line: "Coupon discount (LOYAL) - ₹59.90"
-        Array.from(root.querySelectorAll("*")).forEach((el) => {
-          if (el.children.length === 0) {
-            const txt = (el.textContent || "").trim();
-            const billMatch = txt.match(/coupon\s*discount\s*\(([A-Za-z0-9_-]+)\)\s*[-:]?\s*₹?\s*([\d,]+(\.\d+)?)/i);
-            if (billMatch) {
-              const cName = billMatch[1].trim();
-              const upper = cName.toUpperCase();
-              if (cName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
-                if (!customerCoupons.includes(cName)) customerCoupons.push(cName);
-                if (billMatch[2]) {
-                  const val = Math.round(parseFloat(billMatch[2].replace(/,/g, "")) * 100);
-                  if (val > 0) manualCouponAmount = Math.max(manualCouponAmount, val);
-                }
-              }
-            }
+        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
+        const coupNameEl = root.querySelector("#sr-cart-applied-coupon-name, #sr-cart-applied-coupon-title");
+        const coupName = (coupNameEl?.textContent || "").trim();
 
-            const savedMatch = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved\s+with\s+([A-Za-z0-9_-]+)/i);
-            if (savedMatch) {
-              const cName = savedMatch[3]?.trim();
-              const upper = (cName || "").toUpperCase();
-              if (cName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
-                if (!customerCoupons.includes(cName)) customerCoupons.push(cName);
-                if (savedMatch[1]) {
-                  const val = Math.round(parseFloat(savedMatch[1].replace(/,/g, "")) * 100);
-                  if (val > 0) manualCouponAmount = Math.max(manualCouponAmount, val);
+        if (coupName && !isAppOrAutoDiscount(coupName)) {
+          if (!customerCoupons.includes(coupName)) customerCoupons.push(coupName);
+          if (coupAmtEl) {
+            const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
+            const cVal = Math.round(parseFloat(txt) * 100);
+            if (cVal > 0 && manualCouponAmount === 0) {
+              manualCouponAmount = cVal;
+            }
+          }
+        }
+
+        const allTextNodes = Array.from(root.querySelectorAll("*")).filter(
+          (el) => el.children.length === 0 && (el.textContent || "").includes("saved with")
+        );
+        allTextNodes.forEach((el) => {
+          const txt = (el.textContent || "").trim();
+          const m = txt.match(/₹?\s*([\d,]+(\.\d+)?)\s*saved\s+with\s+([A-Za-z0-9_-]+)?/i);
+          if (m && m[3]) {
+            const c = m[3].trim();
+            if (c && !isAppOrAutoDiscount(c)) {
+              if (!customerCoupons.includes(c)) customerCoupons.push(c);
+              if (m[1]) {
+                const val = Math.round(parseFloat(m[1].replace(/,/g, "")) * 100);
+                if (val > 0 && manualCouponAmount === 0) {
+                  manualCouponAmount = val;
                 }
               }
             }
           }
         });
-
-        const coupAmtEl = root.querySelector("#sr-cart-applied-coupon-amount");
-        const coupNameEl = root.querySelector("#sr-cart-applied-coupon-name, #sr-cart-applied-coupon-title");
-        const coupName = (coupNameEl?.textContent || "").trim();
-        const upper = coupName.toUpperCase();
-
-        if (coupName && !upper.startsWith("FREEGIFT") && !upper.includes("-BUY") && !upper.startsWith("TEST-BUY") && !upper.startsWith("BUNDLE-") && !upper.includes("TEST BUNDLE") && !upper.startsWith("[BUNDLE") && !upper.startsWith("[VOLUME")) {
-          if (!customerCoupons.includes(coupName)) customerCoupons.push(coupName);
-          if (coupAmtEl) {
-            const txt = (coupAmtEl.textContent || "").replace(/[^\d.]/g, "");
-            const cVal = Math.round(parseFloat(txt) * 100);
-            if (cVal > 0) {
-              manualCouponAmount = Math.max(manualCouponAmount, cVal);
-            }
-          }
-        }
       });
 
       // 3. Storefront API Sync: Only sync customer's actual manual coupons (e.g. LOYAL)
       // Volume & Bundle discounts are NATIVE AUTOMATIC DISCOUNTS on Shopify and apply without any coupon code!
-      // Never pass app discount codes (BUNDLE-* / TEST-BUY*) as coupon codes so Fastrr's coupon slot remains 100% free for coupons and doesn't block Fastrr automatic discounts / freebies!
+      // Never pass app discount codes as coupon codes so Fastrr's coupon slot remains 100% free for coupons and doesn't block Fastrr automatic discounts / freebies!
       const targetCodes = [];
       customerCoupons.forEach((c) => {
-        if (c && !targetCodes.includes(c)) {
+        if (c && !isAppOrAutoDiscount(c) && !targetCodes.includes(c)) {
           targetCodes.push(c);
         }
       });
@@ -917,8 +926,8 @@
       // ALWAYS keep coupon slot free for customer coupons or Fastrr's "View more coupons" list.
       // If customer applied a manual coupon (e.g. LOYAL), forward it to Fastrr.
       // If no customer coupon is applied, thoroughly clear app coupon cookies so Fastrr shows all available coupons and doesn't drop free gifts!
-      if (customerCoupons.length > 0) {
-        const custCode = customerCoupons[0];
+      if (targetCodes.length > 0) {
+        const custCode = targetCodes[0];
         document.cookie = `discount_code=${custCode}; path=/; SameSite=None; Secure`;
         document.cookie = `fastrrCouponCode=${custCode}; path=/; SameSite=None; Secure`;
         try { localStorage.setItem("fastrrCouponCode", custCode); } catch {}
@@ -926,7 +935,7 @@
         clearAppCouponCookies();
       }
 
-      // Combine: Deduct manual coupon from total alongside volume discount!
+      // 4. Combine: Deduct manual coupon from total alongside volume discount!
       if (manualCouponAmount > 0) {
         finalTotal = Math.max(0, finalTotal - manualCouponAmount);
       }
@@ -1024,6 +1033,7 @@
           volDiv.setAttribute("style", styleVars);
           volDiv.dataset.variantId = String(prod.variants?.[0]?.id || "");
           volDiv.dataset.productId = pIdStr;
+          volDiv.dataset.productTitle = prod.title;
           volDiv.dataset.basePrice = String(basePrice);
           volDiv.innerHTML = `
             <div class="bt-widget-header">
@@ -1121,6 +1131,7 @@
                   <input type="checkbox" checked class="bt-fbt-companion-checkbox"
                     data-product-id="${cpId}"
                     data-variant-id="${cpVId}"
+                    data-title="${cp.title || "Companion Item"}"
                     data-price="${cpPrice}"
                     data-discount="${cpDisc}">
                   <span class="bt-fbt-item-name">${cp.title || "Companion Item"}</span>
@@ -1169,16 +1180,19 @@
     } catch {}
   }
 
-  // 8. PASS-THROUGH CART CALLS (ZERO TAMPERING / INSTANT REFRESH ON CRUD)
+  // 8. PASS-THROUGH CART & COUPON CALLS (INSTANT REFRESH ACROSS ALL CRUD & COUPON EVENTS)
   const _fetch = window.fetch;
   window.fetch = function(...args) {
     const res = _fetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : (args[0]?.url || "");
-      if (/\/cart(\.js|\/(add|change|update|clear))/i.test(url) && !url.includes("_bt=")) {
+      if (
+        (/\/(cart(\.js|\/(add|change|update|clear))|mini-cart|coupon|aggregator|promotion)/i.test(url)) &&
+        !url.includes("_bt=")
+      ) {
         res.then(() => {
-          setTimeout(syncCartDiscount, 150);
-          setTimeout(syncCartDiscount, 600);
+          setTimeout(syncCartDiscount, 100);
+          setTimeout(syncCartDiscount, 450);
         }).catch(() => {});
       }
     } catch {}
@@ -1192,10 +1206,14 @@
     return _xhrOpen.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function(...args) {
-    if (this._btUrl && /\/cart(\.js|\/(add|change|update|clear))/i.test(this._btUrl) && !this._btUrl.includes("_bt=")) {
+    if (
+      this._btUrl &&
+      (/\/(cart(\.js|\/(add|change|update|clear))|mini-cart|coupon|aggregator|promotion)/i.test(this._btUrl)) &&
+      !this._btUrl.includes("_bt=")
+    ) {
       this.addEventListener("load", () => {
-        setTimeout(syncCartDiscount, 150);
-        setTimeout(syncCartDiscount, 600);
+        setTimeout(syncCartDiscount, 100);
+        setTimeout(syncCartDiscount, 450);
       });
     }
     return _xhrSend.apply(this, args);
@@ -1205,36 +1223,35 @@
     try {
       const data = e.data;
       if (typeof data === "string" && (data.includes("cart") || data.includes("coupon") || data.includes("discount") || data.includes("headless") || data.includes("checkout"))) {
-        setTimeout(syncCartDiscount, 250);
+        setTimeout(syncCartDiscount, 150);
+        setTimeout(syncCartDiscount, 500);
       } else if (data && typeof data === "object") {
-        const trig = data.trigger || data.action || data.type || "";
-        if (/cart|coupon|discount|checkout|headless|payment/i.test(trig)) {
-          setTimeout(syncCartDiscount, 250);
+        const trig = data.trigger || data.action || data.type || data.name || "";
+        if (/cart|coupon|discount|checkout|headless|payment|SRSC/i.test(trig)) {
+          setTimeout(syncCartDiscount, 150);
+          setTimeout(syncCartDiscount, 500);
         }
       }
     } catch {}
   });
 
   document.addEventListener("click", (e) => {
-    const btn = e.target.closest("button, a, [role='button']");
+    const btn = e.target?.closest?.("button, a, [role='button'], input[type='submit'], [class*='coupon'], [class*='remove'], [class*='delete'], [class*='qty'], [class*='quantity']");
     if (!btn) return;
-    const txt = (btn.textContent || "").trim().toLowerCase();
-    if (txt === "+" || txt === "-" || btn.className?.includes?.("qty") || btn.className?.includes?.("quantity")) {
-      setTimeout(syncCartDiscount, 250);
-      setTimeout(syncCartDiscount, 650);
-    }
+    setTimeout(syncCartDiscount, 150);
+    setTimeout(syncCartDiscount, 500);
   }, true);
 
   function start() {
     clearAppCouponCookies();
     getConfig();
     hydratePdp();
-    setTimeout(syncCartDiscount, 300);
+    setTimeout(syncCartDiscount, 250);
     attachObservers();
   }
 
   document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", start) : start();
   document.addEventListener("shopify:section:load", start);
-  window.addEventListener("cart:refresh", () => setTimeout(syncCartDiscount, 200));
-  window.addEventListener("cart:updated", () => setTimeout(syncCartDiscount, 200));
+  window.addEventListener("cart:refresh", () => setTimeout(syncCartDiscount, 150));
+  window.addEventListener("cart:updated", () => setTimeout(syncCartDiscount, 150));
 })();
