@@ -24,9 +24,13 @@
   }
 
   // Clear any app discount codes from cookies and localStorage so Fastrr's coupon slot is 100% free for customer coupons and Fastrr's "View more coupons" list
-  function clearAppCouponCookies() {
+  function clearAppCouponCookies(force = false) {
     try {
-      ["fastrrCouponCode", "fastrrCouponCodeFromLink", "discount_code"].forEach((name) => {
+      const currentFastrr = (localStorage.getItem("fastrrCouponCode") || "").trim();
+      if (!force && currentFastrr && !isAppOrAutoDiscount(currentFastrr)) {
+        return;
+      }
+      ["fastrrCouponCode", "fastrrCouponCodeFromLink", "fastrrCouponCodes"].forEach((name) => {
         document.cookie = `${name}=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
         document.cookie = `${name}=; path=/; SameSite=None; Secure; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
         try {
@@ -41,6 +45,7 @@
       });
       try {
         localStorage.removeItem("fastrrCouponCode");
+        localStorage.removeItem("fastrrCouponCodes");
         sessionStorage.removeItem("fastrrCouponCode");
         sessionStorage.removeItem("fastrrCouponCodeFromLink");
       } catch {}
@@ -534,6 +539,20 @@
   }
 
   // 5. FIND APPLICABLE DISCOUNT (EVALUATED FOR CURRENT CART)
+  function matchesCompanion(it, p) {
+    if (!it || !p) return false;
+    const itPId = String(it.product_id || it.productId || "").replace(/\D/g, "");
+    const itVId = String(it.variant_id || it.variantId || it.id || it.itemId || "").replace(/\D/g, "");
+    const cpPId = String(p.productId || p.product_id || "").replace(/\D/g, "");
+    const cpVId = String(p.variantId || p.variant_id || "").replace(/\D/g, "");
+    if (cpPId && itPId === cpPId) return true;
+    if (cpVId && itVId === cpVId) return true;
+    const itTitle = (it.title || it.product_title || "").trim().toLowerCase();
+    const cpTitle = (p.title || "").trim().toLowerCase();
+    if (itTitle && cpTitle && (itTitle.includes(cpTitle) || cpTitle.includes(itTitle))) return true;
+    return false;
+  }
+
   const cleanCode = (t) =>
     (t || "")
       .replace(/^(bundle(\s+for)?[:\s]*|volume(\s+tier)?[:\s]*|collection(\s+tier)?[:\s]*)/i, "")
@@ -568,25 +587,16 @@
       } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
         const targetItem = cart.items.find((it) =>
           String(it.product_id) === tId ||
-          (r.triggerProduct?.variantId && String(it.variant_id) === String(r.triggerProduct.variantId).replace(/\D/g, ""))
+          (r.triggerProduct?.variantId && String(it.variant_id) === String(r.triggerProduct.variantId).replace(/\D/g, "")) ||
+          (r.triggerProduct?.title && (it.title || it.product_title || "").toLowerCase().includes(r.triggerProduct.title.toLowerCase()))
         );
         const hasAllCompanions = r.fbtProducts.every((p) => {
-          const cpId = String(p.productId || "").replace(/\D/g, "");
-          const cpVId = String(p.variantId || "").replace(/\D/g, "");
-          return cart.items.some((it) =>
-            (cpId && String(it.product_id) === cpId) ||
-            (cpVId && String(it.variant_id) === cpVId)
-          );
+          return cart.items.some((it) => matchesCompanion(it, p));
         });
 
         if (targetItem && hasAllCompanions) {
           const companionItems = r.fbtProducts.map((p) => {
-            const cpId = String(p.productId || "").replace(/\D/g, "");
-            const cpVId = String(p.variantId || "").replace(/\D/g, "");
-            return cart.items.find((it) =>
-              (cpId && String(it.product_id) === cpId) ||
-              (cpVId && String(it.variant_id) === cpVId)
-            );
+            return cart.items.find((it) => matchesCompanion(it, p));
           });
           const bundleCount = Math.min(targetItem.quantity, ...companionItems.map((it) => it?.quantity || 1));
           const isFixed = r.discountType === "FIXED_AMOUNT";
@@ -616,6 +626,120 @@
     if (!candidates.length) return { disc: 0, code: null };
     candidates.sort((a, b) => b.disc - a.disc);
     return { disc: candidates[0].disc, code: candidates[0].code };
+  }
+
+  // Calculate and apply bundle discounts directly to cart line-item prices
+  // so Shiprocket Smart Cart and Fastrr display discounted prices natively
+  // without occupying Fastrr's single coupon slot
+  function applyBundlePricesToCart(cart, rules) {
+    if (!cart?.items?.length || !rules?.length) return cart;
+    const { disc } = getActiveDiscount(cart, rules);
+    if (!disc || disc <= 0) return cart;
+
+    const cloned = JSON.parse(JSON.stringify(cart));
+    let totalDiscount = 0;
+
+    for (const r of rules) {
+      if (!r.active) continue;
+      const tId = String(r.targetGid || "").replace(/\D/g, "");
+
+      if (r.ruleType === "VOLUME" && r.tiers?.length) {
+        const items = cloned.items.filter((it) =>
+          r.targetType === "PRODUCT"
+            ? String(it.product_id) === tId
+            : (r.collectionProductIds || []).map(String).includes(String(it.product_id))
+        );
+        const qty = items.reduce((s, it) => s + it.quantity, 0);
+        const t = [...r.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => qty >= x.minQuantity);
+        if (t) {
+          const isFixed = t.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 0));
+          items.forEach((it) => {
+            const origUnit = Math.round((it.original_line_price || it.price * it.quantity) / it.quantity);
+            const discPerUnit = isFixed ? Math.round((val * 100) / qty) : Math.round(origUnit * (val / 100));
+            const newUnit = Math.max(0, origUnit - discPerUnit);
+            it.price = newUnit;
+            it.discounted_price = newUnit;
+            it.final_price = newUnit;
+            it.line_price = newUnit * it.quantity;
+            it.final_line_price = newUnit * it.quantity;
+            totalDiscount += discPerUnit * it.quantity;
+          });
+        }
+      } else if (r.ruleType === "FBT" && r.fbtProducts?.length) {
+        const targetItem = cloned.items.find((it) =>
+          String(it.product_id) === tId ||
+          (r.triggerProduct?.variantId && String(it.variant_id) === String(r.triggerProduct.variantId).replace(/\D/g, "")) ||
+          (r.triggerProduct?.title && (it.title || it.product_title || "").toLowerCase().includes(r.triggerProduct.title.toLowerCase()))
+        );
+        const hasAllCompanions = r.fbtProducts.every((p) => {
+          return cloned.items.some((it) => matchesCompanion(it, p));
+        });
+
+        if (targetItem && hasAllCompanions) {
+          const companionItems = r.fbtProducts.map((p) => {
+            return cloned.items.find((it) => matchesCompanion(it, p));
+          });
+          const bundleCount = Math.min(targetItem.quantity, ...companionItems.map((it) => it?.quantity || 1));
+          const isFixed = r.discountType === "FIXED_AMOUNT";
+          const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
+
+          if (!isFixed) {
+            const bp = Number(r.mainDiscountPercent || val || 0);
+            if (bp > 0) {
+              const origUnit = Math.round((targetItem.original_line_price || targetItem.price * targetItem.quantity) / targetItem.quantity);
+              const discPerUnit = Math.round(origUnit * (bp / 100));
+              const newUnit = Math.max(0, origUnit - discPerUnit);
+              targetItem.price = newUnit;
+              targetItem.discounted_price = newUnit;
+              targetItem.final_price = newUnit;
+              targetItem.line_price = newUnit * targetItem.quantity;
+              targetItem.final_line_price = newUnit * targetItem.quantity;
+              totalDiscount += discPerUnit * bundleCount;
+            }
+
+            companionItems.forEach((it, idx) => {
+              if (!it) return;
+              const cp = Number(r.fbtProducts[idx]?.discountPercent || bp || 10);
+              const origUnit = Math.round((it.original_line_price || it.price * it.quantity) / it.quantity);
+              const discPerUnit = Math.round(origUnit * (cp / 100));
+              const newUnit = Math.max(0, origUnit - discPerUnit);
+              it.price = newUnit;
+              it.discounted_price = newUnit;
+              it.final_price = newUnit;
+              it.line_price = newUnit * it.quantity;
+              it.final_line_price = newUnit * it.quantity;
+              totalDiscount += discPerUnit * bundleCount;
+            });
+          } else {
+            const discPerBundle = Math.round(val * 100);
+            totalDiscount += discPerBundle * bundleCount;
+            const origTarget = Math.round((targetItem.original_line_price || targetItem.price * targetItem.quantity) / targetItem.quantity);
+            const discUnit = Math.round(discPerBundle / (1 + companionItems.length));
+            targetItem.price = Math.max(0, origTarget - discUnit);
+            targetItem.discounted_price = targetItem.price;
+            targetItem.final_price = targetItem.price;
+            targetItem.line_price = targetItem.price * targetItem.quantity;
+            targetItem.final_line_price = targetItem.line_price;
+            companionItems.forEach((it) => {
+              if (!it) return;
+              const origComp = Math.round((it.original_line_price || it.price * it.quantity) / it.quantity);
+              it.price = Math.max(0, origComp - discUnit);
+              it.discounted_price = it.price;
+              it.final_price = it.price;
+              it.line_price = it.price * it.quantity;
+              it.final_line_price = it.line_price;
+            });
+          }
+        }
+      }
+    }
+
+    if (totalDiscount > 0) {
+      cloned.total_discount = (cloned.total_discount || 0) + totalDiscount;
+      cloned.total_price = Math.max(0, (cloned.total_price || 0) - totalDiscount);
+    }
+    return cloned;
   }
 
   // 6. SYNC CART DISCOUNT DISPLAY ACROSS ALL CRUD OPERATIONS (NATIVE AUTOMATIC COMBINING)
@@ -769,18 +893,26 @@
 
       // Fastrr / Shiprocket Cookie & localStorage Management:
       // Shopify natively combines comma-separated discount codes (e.g. BUNDLE-TEST-10OFF,LOYAL).
-      // Fastrr's single coupon slot accepts the customer's selected coupon (e.g. LOYAL) or bundle code.
       if (targetCodes.length > 0) {
         const combinedCodes = targetCodes.join(",");
         document.cookie = `discount_code=${combinedCodes}; path=/; SameSite=None; Secure`;
-        const primaryCode = customerCoupons[0] || (disc > 0 && code ? code : targetCodes[0]);
-        document.cookie = `fastrrCouponCode=${primaryCode}; path=/; SameSite=None; Secure`;
-        try {
-          localStorage.setItem("fastrrCouponCode", primaryCode);
-          localStorage.setItem("fastrrCouponCodes", JSON.stringify(targetCodes));
-        } catch {}
+
+        // CRITICAL FOR SHIPROCKET FASTRR:
+        // fastrrCouponCode MUST ONLY be set if the customer entered a manual coupon (e.g. LOYAL, WELCOME).
+        // NEVER put BUNDLE-... into fastrrCouponCode, because Fastrr has only 1 coupon slot.
+        // Putting BUNDLE-... into fastrrCouponCode wipes out Shiprocket Free Gifts and disables "View more coupons".
+        if (customerCoupons.length > 0) {
+          const custCode = customerCoupons[0];
+          document.cookie = `fastrrCouponCode=${custCode}; path=/; SameSite=None; Secure`;
+          try {
+            localStorage.setItem("fastrrCouponCode", custCode);
+            localStorage.setItem("fastrrCouponCodes", JSON.stringify(customerCoupons));
+          } catch {}
+        } else {
+          clearAppCouponCookies(true);
+        }
       } else {
-        clearAppCouponCookies();
+        clearAppCouponCookies(true);
       }
 
       // 4. Combine: Deduct manual coupon from total alongside volume discount!
@@ -1031,21 +1163,139 @@
   // 8. PASS-THROUGH CART & COUPON CALLS (INSTANT REFRESH ACROSS ALL CRUD & COUPON EVENTS)
   const _fetch = window.fetch;
   window.fetch = function(...args) {
-    const res = _fetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : (args[0]?.url || "");
+
+      // A. Intercept Shiprocket Aggregator storefrontUrl checkout link creation
+      if (url.includes("/smartcart/storefrontUrl") || url.includes("aggregator-service")) {
+        try {
+          if (args[1] && args[1].body) {
+            const bodyObj = JSON.parse(args[1].body);
+            let changed = false;
+
+            // Strip BUNDLE-... code from Fastrr coupon slot so Fastrr doesn't drop Free Gifts & allows LOYAL/WELCOME!
+            if (bodyObj.couponCode && isAppOrAutoDiscount(bodyObj.couponCode)) {
+              delete bodyObj.couponCode;
+              changed = true;
+            }
+
+            // Ensure items passed to aggregator have bundle-discounted prices
+            if (Array.isArray(bodyObj.items) && bodyObj.items.length > 0) {
+              const rules = getRulesSync();
+              for (const r of rules) {
+                if (!r.active || r.ruleType !== "FBT" || !r.fbtProducts?.length) continue;
+                const tId = String(r.targetGid || "").replace(/\D/g, "");
+                const tItem = bodyObj.items.find(
+                  (it) =>
+                    String(it.productId) === tId ||
+                    (r.triggerProduct?.variantId && String(it.itemId) === String(r.triggerProduct.variantId).replace(/\D/g, "")) ||
+                    (r.triggerProduct?.title && (it.title || "").toLowerCase().includes(r.triggerProduct.title.toLowerCase()))
+                );
+                const hasAllCompanions = r.fbtProducts.every((p) => {
+                  return bodyObj.items.some((it) => matchesCompanion(it, p));
+                });
+
+                if (tItem && hasAllCompanions) {
+                  const isFixed = r.discountType === "FIXED_AMOUNT";
+                  const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
+                  if (!isFixed) {
+                    const bp = Number(r.mainDiscountPercent || val || 0);
+                    if (bp > 0 && tItem.price) {
+                      const origP = r.triggerProduct?.priceCents ? r.triggerProduct.priceCents / 100 : tItem.price;
+                      tItem.price = Math.round(origP * (1 - bp / 100) * 100) / 100;
+                      changed = true;
+                    }
+                    r.fbtProducts.forEach((cp) => {
+                      const compItem = bodyObj.items.find((it) => matchesCompanion(it, cp));
+                      if (compItem && compItem.price) {
+                        const cpDisc = Number(cp.discountPercent || bp || 10);
+                        const origP = cp.price ? cp.price / 100 : (cp.priceCents ? cp.priceCents / 100 : compItem.price);
+                        compItem.price = Math.round(origP * (1 - cpDisc / 100) * 100) / 100;
+                        changed = true;
+                      }
+                    });
+                  }
+                }
+              }
+            }
+
+            if (changed) {
+              args[1].body = JSON.stringify(bodyObj);
+            }
+          }
+        } catch (e) {
+          console.warn("[BT] Error in storefrontUrl interceptor:", e);
+        }
+      }
+
+      // B. Intercept Cart JSON endpoints so Smart Cart & Fastrr read bundle-discounted line items
+      const isCartEndpoint = (/\/(cart(\.js|\.json|\/(add|change|update)\.js)?(\?|$))/i.test(url)) && !url.includes("_bt=");
+      if (isCartEndpoint) {
+        return _fetch.apply(this, args).then(async (response) => {
+          try {
+            const clone = response.clone();
+            const data = await clone.json();
+            if (data && (Array.isArray(data.items) || data.token)) {
+              const rules = getRulesSync();
+              const modified = applyBundlePricesToCart(data, rules);
+              setTimeout(syncCartDiscount, 100);
+              setTimeout(syncCartDiscount, 450);
+              return new Response(JSON.stringify(modified), {
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+              });
+            }
+          } catch {}
+          setTimeout(syncCartDiscount, 100);
+          setTimeout(syncCartDiscount, 450);
+          return response;
+        });
+      }
+
+      // C. General triggers for coupon/mini-cart/promotion
       if (
-        (/\/(cart(\.js|\/(add|change|update|clear))|mini-cart|coupon|aggregator|promotion)/i.test(url)) &&
+        (/\/(mini-cart|coupon|aggregator|promotion)/i.test(url)) &&
         !url.includes("_bt=")
       ) {
+        const res = _fetch.apply(this, args);
         res.then(() => {
           setTimeout(syncCartDiscount, 100);
           setTimeout(syncCartDiscount, 450);
         }).catch(() => {});
+        return res;
       }
     } catch {}
-    return res;
+
+    return _fetch.apply(this, args);
   };
+
+  // Intercept window.miniCartInit to discount items before Smart Cart drawer initializes
+  try {
+    let _miniCartInit = window.miniCartInit;
+    Object.defineProperty(window, "miniCartInit", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return _miniCartInit;
+      },
+      set(fn) {
+        _miniCartInit = function(items, ...rest) {
+          try {
+            if (Array.isArray(items)) {
+              const dummyCart = { items };
+              const rules = getRulesSync();
+              applyBundlePricesToCart(dummyCart, rules);
+            }
+          } catch {}
+          return fn.apply(this, [items, ...rest]);
+        };
+      }
+    });
+    if (typeof _miniCartInit === "function") {
+      window.miniCartInit = _miniCartInit;
+    }
+  } catch {}
 
   const _xhrOpen = XMLHttpRequest.prototype.open;
   const _xhrSend = XMLHttpRequest.prototype.send;
