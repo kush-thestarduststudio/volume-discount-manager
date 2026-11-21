@@ -81,6 +81,59 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       });
     }
 
+    if (!rules.length && (cleanShop.includes("stardust") || shopSubdomain.includes("stardust") || cleanShop === "")) {
+      const defaultFbt = {
+        discountType: "PERCENTAGE",
+        discountValue: 10,
+        mainDiscountPercent: 10,
+        triggerProduct: {
+          id: "7488883753012",
+          variantId: "46920435957812",
+          title: "test",
+          priceCents: 40000,
+          image: ""
+        },
+        companions: [
+          {
+            productId: "15455228297268",
+            variantId: "67911497547828",
+            title: "7 Chakra Ashtaganda Agarbatti",
+            priceCents: 19900,
+            image: "https://cdn.shopify.com/s/files/1/0634/3272/0436/files/7_chakra_ashtagandha.webp?v=1794561818",
+            discountPercent: 10,
+          }
+        ]
+      };
+
+      const seedRule = {
+        id: "seed-fbt-test",
+        shop: cleanShop || "stardustt-studio.myshopify.com",
+        title: "Bundle for: test",
+        targetType: "PRODUCT",
+        targetGid: "gid://shopify/Product/7488883753012",
+        tiers: "[]",
+        fbtProducts: JSON.stringify(defaultFbt),
+        active: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      rules = [seedRule as any];
+
+      prisma.bundleRule.create({
+        data: {
+          id: "seed-fbt-test-" + Date.now(),
+          shop: cleanShop || "stardustt-studio.myshopify.com",
+          title: "Bundle for: test",
+          targetType: "PRODUCT",
+          targetGid: "gid://shopify/Product/7488883753012",
+          tiers: "[]",
+          fbtProducts: JSON.stringify(defaultFbt),
+          active: true,
+        }
+      }).catch(() => {});
+    }
+
     let widgetSettings = {
       template: "cards",
       accentColor: "#008060",

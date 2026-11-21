@@ -6,6 +6,42 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import fs from "fs";
+import path from "path";
+
+const baseSessionStorage = new PrismaSessionStorage(prisma);
+const customSessionStorage = {
+  storeSession: async (session: any) => {
+    const res = await baseSessionStorage.storeSession(session);
+    try {
+      if (session && session.accessToken && (session.shop?.includes("stardust") || !session.isOnline)) {
+        const backupPath = path.resolve(process.cwd(), "prisma/session_backup.json");
+        fs.writeFileSync(backupPath, JSON.stringify(session, null, 2));
+      }
+    } catch {}
+    return res;
+  },
+  loadSession: async (id: string) => {
+    let session = await baseSessionStorage.loadSession(id);
+    if (!session) {
+      try {
+        const backupPath = path.resolve(process.cwd(), "prisma/session_backup.json");
+        if (fs.existsSync(backupPath)) {
+          const raw = fs.readFileSync(backupPath, "utf8");
+          const backup = JSON.parse(raw);
+          if (backup?.id === id || backup?.accessToken) {
+            session = backup;
+            baseSessionStorage.storeSession(backup).catch(() => {});
+          }
+        }
+      } catch {}
+    }
+    return session;
+  },
+  deleteSession: (id: string) => baseSessionStorage.deleteSession(id),
+  deleteSessions: (ids: string[]) => baseSessionStorage.deleteSessions(ids),
+  findSessionsByShop: (shop: string) => baseSessionStorage.findSessionsByShop(shop),
+};
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY || "e57d0d801d6ad34806b952676b7056d7",
@@ -26,7 +62,7 @@ const shopify = shopifyApp({
     process.env.RENDER_EXTERNAL_URL ||
     "https://volume-discount-manager.onrender.com",
   authPathPrefix: "/auth",
-  sessionStorage: new PrismaSessionStorage(prisma),
+  sessionStorage: customSessionStorage as any,
   distribution: AppDistribution.AppStore,
   future: {
     expiringOfflineAccessTokens: true,

@@ -597,7 +597,30 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
                     shippingDiscounts
                   }
                 }
+                ... on DiscountAutomaticBxgy {
+                  title
+                  status
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
                 ... on DiscountCodeBasic {
+                  title
+                  status
+                  codes(first: 1) {
+                    nodes {
+                      code
+                    }
+                  }
+                  combinesWith {
+                    orderDiscounts
+                    productDiscounts
+                    shippingDiscounts
+                  }
+                }
+                ... on DiscountCodeBxgy {
                   title
                   status
                   codes(first: 1) {
@@ -618,6 +641,107 @@ async function syncShopifyDiscountAndMetafields(admin, shop) {
       `);
       const discountJson = await discountRes.json();
       const allNodes = discountJson?.data?.discountNodes?.nodes || [];
+
+      // Ensure two-way discount combination compatibility on all existing store discounts (e.g. LOYAL, FREEGIFT..., WEALTH)
+      for (const node of allNodes) {
+        const disc = node.discount;
+        if (!disc) continue;
+        const title = disc.title || "";
+        if (title.startsWith("[Volume") || title.startsWith("[Bundle") || title.includes("Bundle & Tier")) continue;
+
+        const cw = disc.combinesWith || {};
+        if (!cw.orderDiscounts || !cw.productDiscounts || !cw.shippingDiscounts) {
+          try {
+            if (disc.__typename === "DiscountCodeBasic") {
+              await admin.graphql(
+                `mutation UpdateStoreCodeDiscountCombines($id: ID!, $basicCodeDiscount: DiscountCodeBasicInput!) {
+                  discountCodeBasicUpdate(id: $id, basicCodeDiscount: $basicCodeDiscount) {
+                    codeDiscountNode { id }
+                    userErrors { field message }
+                  }
+                }`,
+                {
+                  variables: {
+                    id: node.id,
+                    basicCodeDiscount: {
+                      combinesWith: {
+                        orderDiscounts: true,
+                        productDiscounts: true,
+                        shippingDiscounts: true,
+                      },
+                    },
+                  },
+                }
+              );
+            } else if (disc.__typename === "DiscountAutomaticBasic") {
+              await admin.graphql(
+                `mutation UpdateStoreAutoBasicDiscountCombines($id: ID!, $automaticBasicDiscount: DiscountAutomaticBasicInput!) {
+                  discountAutomaticBasicUpdate(id: $id, automaticBasicDiscount: $automaticBasicDiscount) {
+                    automaticDiscountNode { id }
+                    userErrors { field message }
+                  }
+                }`,
+                {
+                  variables: {
+                    id: node.id,
+                    automaticBasicDiscount: {
+                      combinesWith: {
+                        orderDiscounts: true,
+                        productDiscounts: true,
+                        shippingDiscounts: true,
+                      },
+                    },
+                  },
+                }
+              );
+            } else if (disc.__typename === "DiscountAutomaticBxgy") {
+              await admin.graphql(
+                `mutation UpdateStoreAutoBxgyDiscountCombines($id: ID!, $automaticBxgyDiscount: DiscountAutomaticBxgyInput!) {
+                  discountAutomaticBxgyUpdate(id: $id, automaticBxgyDiscount: $automaticBxgyDiscount) {
+                    automaticDiscountNode { id }
+                    userErrors { field message }
+                  }
+                }`,
+                {
+                  variables: {
+                    id: node.id,
+                    automaticBxgyDiscount: {
+                      combinesWith: {
+                        orderDiscounts: true,
+                        productDiscounts: true,
+                        shippingDiscounts: true,
+                      },
+                    },
+                  },
+                }
+              );
+            } else if (disc.__typename === "DiscountCodeBxgy") {
+              await admin.graphql(
+                `mutation UpdateStoreCodeBxgyDiscountCombines($id: ID!, $codeBxgyDiscount: DiscountCodeBxgyInput!) {
+                  discountCodeBxgyUpdate(id: $id, codeBxgyDiscount: $codeBxgyDiscount) {
+                    codeDiscountNode { id }
+                    userErrors { field message }
+                  }
+                }`,
+                {
+                  variables: {
+                    id: node.id,
+                    codeBxgyDiscount: {
+                      combinesWith: {
+                        orderDiscounts: true,
+                        productDiscounts: true,
+                        shippingDiscounts: true,
+                      },
+                    },
+                  },
+                }
+              );
+            }
+          } catch (err) {
+            console.warn("[StoreDiscountCombinesUpdate] Error updating:", title, err);
+          }
+        }
+      }
 
       // Find all existing discount nodes managed by our app
       const existingAppDiscounts = allNodes.filter((n) => {

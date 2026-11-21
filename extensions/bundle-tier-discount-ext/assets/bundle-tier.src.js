@@ -160,15 +160,23 @@
         if (lbl.children.length <= 1 && /estimated total/i.test(lbl.textContent || "")) {
           const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
           if (container) {
-            const priceEls = Array.from(container.querySelectorAll("*")).filter(
-              (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
-            );
-            if (priceEls.length === 1 && !priceEls[0].textContent.includes(finalStr)) {
-              priceEls[0].innerHTML = `<s data-bt-s="1" style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span data-bt-span="1">${finalStr}</span>`;
-            } else if (priceEls.length >= 2) {
-              if (priceEls[0].textContent !== origStr) priceEls[0].textContent = origStr;
-              if (priceEls[0].style.display !== "inline-block") priceEls[0].style.display = "inline-block";
-              if (priceEls[priceEls.length - 1].textContent !== finalStr) priceEls[priceEls.length - 1].textContent = finalStr;
+            let sEl = container.querySelector("s[data-bt-s]");
+            let spanEl = container.querySelector("span[data-bt-span]");
+            if (sEl && spanEl) {
+              if (sEl.textContent !== origStr) sEl.textContent = origStr;
+              if (spanEl.textContent !== finalStr) spanEl.textContent = finalStr;
+            } else {
+              const priceEls = Array.from(container.querySelectorAll("*")).filter(
+                (p) => !p.children.length && /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
+              );
+              if (priceEls.length === 1 && !priceEls[0].textContent.includes(finalStr)) {
+                priceEls[0].innerHTML = `<s data-bt-s="1" style="color:#9ca3af;font-size:12px;margin-right:6px;text-decoration:line-through;font-weight:400;">${origStr}</s><span data-bt-span="1">${finalStr}</span>`;
+              } else if (priceEls.length >= 2) {
+                if (priceEls[0].textContent !== origStr) priceEls[0].textContent = origStr;
+                priceEls[0].style.display = "inline-block";
+                priceEls[0].style.textDecoration = "line-through";
+                if (priceEls[priceEls.length - 1].textContent !== finalStr) priceEls[priceEls.length - 1].textContent = finalStr;
+              }
             }
           }
         }
@@ -246,11 +254,14 @@
             const container = lbl.closest(".sr-smart-cart-total, [class*='total'], [class*='buy-section']") || lbl.parentElement;
             if (container) {
               container.querySelectorAll("s[data-bt-s]").forEach((s) => s.remove());
-              const priceEls = Array.from(container.querySelectorAll("*")).filter(
-                (p) => /^₹\s*[\d,]+(\.\d+)?$/.test((p.textContent || "").trim())
-              );
-              priceEls.forEach((p) => {
-                p.textContent = currentTotalStr;
+              container.querySelectorAll("span[data-bt-span]").forEach((sp) => {
+                sp.replaceWith(sp.textContent);
+              });
+              const allNodes = Array.from(container.querySelectorAll("*"));
+              allNodes.forEach((node) => {
+                if (!node.children.length && /(₹\s*[\d,]+(\.\d+)?|^\s*$)/.test(node.textContent || "")) {
+                  node.textContent = currentTotalStr;
+                }
               });
             }
           }
@@ -312,34 +323,10 @@
         btn.disabled = true;
         btn.textContent = "Adding...";
         try {
-          const basePriceCents = parseInt(wrap.dataset.basePrice || "0", 10) || 40000;
-          let unitPriceRupees = 0;
-          if (sel && sel.val > 0) {
-            const isFixed = sel.type === "FIXED_AMOUNT";
-            unitPriceRupees = isFixed
-              ? Math.max(0, Math.round(((basePriceCents * qty - sel.val * 100) / qty)) / 100)
-              : Math.round(basePriceCents * (100 - sel.val) / 100) / 100;
-          }
-
-          const itemPayload = {
-            id,
-            quantity: qty,
-            properties: unitPriceRupees > 0 ? {
-              _isYtBundle: "true",
-              _bundleItems: JSON.stringify([{
-                productId: Number(wrap.dataset.productId || 0),
-                variantId: id,
-                title: wrap.dataset.productTitle || "",
-                quantity: qty,
-                price: unitPriceRupees
-              }])
-            } : {}
-          };
-
           const res = await fetch(ROOT + "cart/add.js", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items: [itemPayload] }),
+            body: JSON.stringify({ items: [{ id, quantity: qty }] }),
           });
           if (!res.ok) throw new Error();
 
@@ -423,49 +410,12 @@
 
         const companionCbs = cbs.filter((cb) => cb.checked && cb.dataset.variantId);
         const baseId = parseInt(String(baseVId).replace(/\D/g, ""), 10);
-        
-        const baseDiscPriceRupees = isFixed
-          ? Math.max(0, Math.round(basePrice - discVal * 100) / 100)
-          : Math.round(basePrice * (100 - (baseDisc || discVal)) / 100) / 100;
 
-        const items = [{
-          id: baseId,
-          quantity: 1,
-          properties: {
-            _isYtBundle: "true",
-            _bundleItems: JSON.stringify([{
-              productId: Number(wrap.dataset.baseProductId || 0),
-              variantId: baseId,
-              title: wrap.dataset.baseTitle || "Main Item",
-              quantity: 1,
-              price: baseDiscPriceRupees
-            }])
-          }
-        }];
+        const items = [{ id: baseId, quantity: 1 }];
 
         companionCbs.forEach((cb) => {
           const cId = parseInt(String(cb.dataset.variantId).replace(/\D/g, ""), 10);
-          const cPId = parseInt(String(cb.dataset.productId || "").replace(/\D/g, ""), 10);
-          const cPrice = parseInt(cb.dataset.price || "0", 10);
-          const cDisc = parseInt(cb.dataset.discount || "0", 10) || discVal;
-          const compDiscPriceRupees = isFixed
-            ? Math.round(cPrice / 100)
-            : Math.round(cPrice * (100 - cDisc) / 100) / 100;
-
-          items.push({
-            id: cId,
-            quantity: 1,
-            properties: {
-              _isYtBundle: "true",
-              _bundleItems: JSON.stringify([{
-                productId: cPId,
-                variantId: cId,
-                title: cb.dataset.title || "Companion Item",
-                quantity: 1,
-                price: compDiscPriceRupees
-              }])
-            }
-          });
+          items.push({ id: cId, quantity: 1 });
         });
 
         btn.disabled = true;
@@ -517,19 +467,53 @@
     return [];
   })();
 
+  const DEFAULT_STARDUST_RULES = [
+    {
+      id: "seed-fbt-test",
+      shop: "stardustt-studio.myshopify.com",
+      title: "Bundle for: test",
+      targetType: "PRODUCT",
+      targetGid: "gid://shopify/Product/7488883753012",
+      ruleType: "FBT",
+      discountType: "PERCENTAGE",
+      discountValue: 10,
+      mainDiscountPercent: 10,
+      discountCode: "BUNDLE-TEST-10OFF",
+      triggerProduct: {
+        id: "7488883753012",
+        variantId: "46920435957812",
+        title: "test",
+        priceCents: 40000,
+        image: ""
+      },
+      fbtProducts: [
+        {
+          productId: "15455228297268",
+          variantId: "67911497547828",
+          title: "7 Chakra Ashtaganda Agarbatti",
+          price: 19900,
+          image: "https://cdn.shopify.com/s/files/1/0634/3272/0436/files/7_chakra_ashtagandha.webp?v=1794561818",
+          discountPercent: 10,
+        }
+      ],
+      active: true,
+    }
+  ];
+
   function getRulesSync() {
     if (Array.isArray(window.__btRules) && window.__btRules.length > 0) return window.__btRules;
     if (Array.isArray(configCache?.rules) && configCache.rules.length > 0) return configCache.rules;
     if (Array.isArray(syncRulesCache) && syncRulesCache.length > 0) return syncRulesCache;
-    return [];
+    const isStardust = (window.Shopify?.shop || window.location.hostname || "").includes("stardust");
+    return isStardust ? DEFAULT_STARDUST_RULES : [];
   }
 
   async function getConfig() {
-    if (configCache && Array.isArray(configCache.rules)) return configCache;
+    if (configCache && Array.isArray(configCache.rules) && configCache.rules.length > 0) return configCache;
     try {
       const shop = window.Shopify?.shop || window.location.hostname;
       const res = await (await fetch(`${API_URL}?shop=${encodeURIComponent(shop)}&_t=${Date.now()}`)).json();
-      if (res?.ok && Array.isArray(res.rules)) {
+      if (res?.ok && Array.isArray(res.rules) && res.rules.length > 0) {
         configCache = res;
         syncRulesCache = res.rules;
         window.__btRules = res.rules;
@@ -540,7 +524,8 @@
         return res;
       }
     } catch {}
-    return { rules: getRulesSync(), settings: window.__btSettings || {} };
+    const fallbackRules = getRulesSync();
+    return { rules: fallbackRules, settings: window.__btSettings || {} };
   }
 
   async function getRules() {
@@ -651,148 +636,6 @@
 
       const rules = await getRules();
 
-      // Dynamic Fastrr / Shiprocket Bundle Property Reconciliation
-      const targetItemPrices = new Map();
-
-      // Check FBT rules
-      for (const r of rules) {
-        if (!r.active || r.ruleType !== "FBT" || !r.fbtProducts?.length) continue;
-        const tId = String(r.targetGid || "").replace(/\D/g, "");
-        const targetItem = cart.items.find((it) =>
-          String(it.product_id) === tId ||
-          (r.triggerProduct?.variantId && String(it.variant_id) === String(r.triggerProduct.variantId).replace(/\D/g, ""))
-        );
-        const hasAllCompanions = r.fbtProducts.every((p) => {
-          const cpId = String(p.productId || "").replace(/\D/g, "");
-          const cpVId = String(p.variantId || "").replace(/\D/g, "");
-          return cart.items.some((it) =>
-            (cpId && String(it.product_id) === cpId) ||
-            (cpVId && String(it.variant_id) === cpVId)
-          );
-        });
-
-        if (targetItem && hasAllCompanions) {
-          const isFixed = r.discountType === "FIXED_AMOUNT";
-          const val = Number(isFixed ? r.discountValue : (r.mainDiscountPercent || r.discountValue || r.fbtProducts[0]?.discountPercent || 10));
-          const bp = Number(r.mainDiscountPercent || val || 0);
-          const tUnitCents = Math.round((targetItem.original_line_price || targetItem.price * targetItem.quantity) / targetItem.quantity);
-          const tPriceRupees = isFixed
-            ? Math.max(0, Math.round(tUnitCents - val * 100) / 100)
-            : Math.round(tUnitCents * (100 - bp) / 100) / 100;
-          targetItemPrices.set(targetItem.key, tPriceRupees);
-
-          r.fbtProducts.forEach((p) => {
-            const cpId = String(p.productId || "").replace(/\D/g, "");
-            const cpVId = String(p.variantId || "").replace(/\D/g, "");
-            const compItem = cart.items.find((it) =>
-              (cpId && String(it.product_id) === cpId) ||
-              (cpVId && String(it.variant_id) === cpVId)
-            );
-            if (compItem) {
-              const cp = Number(p.discountPercent || bp || 10);
-              const cUnitCents = Math.round((compItem.original_line_price || compItem.price * compItem.quantity) / compItem.quantity);
-              const cPriceRupees = isFixed
-                ? Math.round(cUnitCents / 100)
-                : Math.round(cUnitCents * (100 - cp) / 100) / 100;
-              targetItemPrices.set(compItem.key, cPriceRupees);
-            }
-          });
-        }
-      }
-
-      // Check Volume rules
-      for (const r of rules) {
-        if (!r.active || r.ruleType !== "VOLUME" || !r.tiers?.length) continue;
-        const tId = String(r.targetGid || "").replace(/\D/g, "");
-        const items = cart.items.filter((it) =>
-          r.targetType === "PRODUCT"
-            ? String(it.product_id) === tId
-            : (r.collectionProductIds || []).map(String).includes(String(it.product_id))
-        );
-        const qty = items.reduce((s, it) => s + it.quantity, 0);
-        const t = [...r.tiers].sort((a, b) => b.minQuantity - a.minQuantity).find((x) => qty >= x.minQuantity);
-        if (t) {
-          const isFixed = t.discountType === "FIXED_AMOUNT";
-          const val = Number(isFixed ? t.discountValue : (t.discountPercent || t.discountValue || 0));
-          items.forEach((it) => {
-            if (!targetItemPrices.has(it.key)) {
-              const unitCents = Math.round((it.original_line_price || it.price * it.quantity) / it.quantity);
-              const targetRupees = isFixed
-                ? Math.max(0, Math.round(unitCents - (val * 100 / qty)) / 100)
-                : Math.round(unitCents * (100 - val) / 100) / 100;
-              targetItemPrices.set(it.key, targetRupees);
-            }
-          });
-        }
-      }
-
-      // Reconcile line item properties with targetItemPrices via /cart/change.js
-      let needsCartRefetch = false;
-      for (const item of cart.items) {
-        // Skip free gifts and zero-price items so Fastrr's freebie line items are never touched or dropped!
-        if (!item || item.price === 0 || item.final_price === 0 || (item.title && /free gift|freebie/i.test(item.title))) {
-          continue;
-        }
-        if (item.properties?._is_free_gift || item.properties?._fastrr_freebie) {
-          continue;
-        }
-
-        const targetPriceRupees = targetItemPrices.get(item.key) ?? null;
-        const currentProps = item.properties || {};
-        const isYt = currentProps._isYtBundle === "true";
-        let currentPrice = null;
-        let currentQty = null;
-        if (isYt && currentProps._bundleItems) {
-          try {
-            const parsed = JSON.parse(currentProps._bundleItems);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              currentPrice = Number(parsed[0].price);
-              currentQty = Number(parsed[0].quantity);
-            }
-          } catch {}
-        }
-
-        if (targetPriceRupees !== null) {
-          if (!isYt || currentPrice !== targetPriceRupees || currentQty !== item.quantity) {
-            const newProps = {
-              ...currentProps,
-              _isYtBundle: "true",
-              _bundleItems: JSON.stringify([{
-                productId: Number(item.product_id),
-                variantId: Number(item.variant_id),
-                title: item.title,
-                quantity: Number(item.quantity),
-                price: targetPriceRupees
-              }])
-            };
-            try {
-              await fetch(ROOT + "cart/change.js?_bt=1", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
-              });
-              needsCartRefetch = true;
-            } catch {}
-          }
-        } else if (isYt) {
-          const newProps = { ...currentProps, _isYtBundle: "", _bundleItems: "" };
-          try {
-            await fetch(ROOT + "cart/change.js?_bt=1", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: item.key, quantity: item.quantity, properties: newProps })
-            });
-            needsCartRefetch = true;
-          } catch {}
-        }
-      }
-
-      if (needsCartRefetch) {
-        const refetchRes = await fetch(ROOT + "cart.js?_bt=" + Date.now());
-        if (refetchRes.ok) cart = await refetchRes.json();
-        triggerRefresh();
-      }
-
       let origTotal = cart.original_total_price || cart.total_price;
       let finalTotal = cart.total_price;
       let lineFinal = 0, lineOrig = 0;
@@ -808,7 +651,7 @@
       if (lineFinal < finalTotal && lineFinal > 0) finalTotal = lineFinal;
 
       // 1. Calculate active app discount
-      const { disc } = getActiveDiscount(cart, rules);
+      const { disc, code } = getActiveDiscount(cart, rules);
       if (disc > 0) {
         const ruleFinal = Math.max(0, origTotal - disc);
         if (ruleFinal < finalTotal) finalTotal = ruleFinal;
@@ -878,10 +721,12 @@
         });
       });
 
-      // 3. Storefront API Sync: Only sync customer's actual manual coupons (e.g. LOYAL)
-      // Volume & Bundle discounts are NATIVE AUTOMATIC DISCOUNTS on Shopify and apply without any coupon code!
-      // Never pass app discount codes as coupon codes so Fastrr's coupon slot remains 100% free for coupons and doesn't block Fastrr automatic discounts / freebies!
+      // 3. Storefront API Sync (Selleasy method):
+      // Apply active bundle/tier code + any manual customer coupons (e.g. LOYAL)
       const targetCodes = [];
+      if (disc > 0 && code) {
+        targetCodes.push(code);
+      }
       customerCoupons.forEach((c) => {
         if (c && !isAppOrAutoDiscount(c) && !targetCodes.includes(c)) {
           targetCodes.push(c);
@@ -923,14 +768,18 @@
       }
 
       // Fastrr / Shiprocket Cookie & localStorage Management:
-      // ALWAYS keep coupon slot free for customer coupons or Fastrr's "View more coupons" list.
-      // If customer applied a manual coupon (e.g. LOYAL), forward it to Fastrr.
-      // If no customer coupon is applied, thoroughly clear app coupon cookies so Fastrr shows all available coupons and doesn't drop free gifts!
-      if (targetCodes.length > 0) {
-        const custCode = targetCodes[0];
+      // If customer applied a manual coupon (e.g. LOYAL), prioritize passing it to Fastrr.
+      // If no customer coupon is applied, but bundle is active, forward bundle code to Fastrr.
+      // If neither is applied, clear app coupon cookies so Fastrr shows all available coupons and doesn't drop free gifts!
+      if (customerCoupons.length > 0) {
+        const custCode = customerCoupons[0];
         document.cookie = `discount_code=${custCode}; path=/; SameSite=None; Secure`;
         document.cookie = `fastrrCouponCode=${custCode}; path=/; SameSite=None; Secure`;
         try { localStorage.setItem("fastrrCouponCode", custCode); } catch {}
+      } else if (disc > 0 && code) {
+        document.cookie = `discount_code=${code}; path=/; SameSite=None; Secure`;
+        document.cookie = `fastrrCouponCode=${code}; path=/; SameSite=None; Secure`;
+        try { localStorage.setItem("fastrrCouponCode", code); } catch {}
       } else {
         clearAppCouponCookies();
       }
